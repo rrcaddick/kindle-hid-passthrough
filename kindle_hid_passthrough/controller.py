@@ -11,7 +11,7 @@ import logging
 import os
 import threading
 
-from bt_setup import power_off_brcm_chip
+from bt_setup import chip
 from config import Protocol, config, normalize_addr
 from device_cache import DeviceCache
 
@@ -236,7 +236,7 @@ class DaemonController:
             try:
                 if suspend:
                     await self.daemon.suspend()
-                    power_off_brcm_chip()
+                    chip().power_off()
                 else:
                     await self.daemon.disconnect()
             except Exception as e:

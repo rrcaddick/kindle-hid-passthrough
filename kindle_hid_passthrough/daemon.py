@@ -10,7 +10,7 @@ import threading
 sys.path.insert(0, '/mnt/us/kindle_hid_passthrough')
 
 from api_server import APIServer, RequestHandler, PORT
-from bt_setup import ensure_brcm_powered, prepare_bt
+from bt_setup import chip, prepare_bt
 from config import config, get_version
 from controller import DaemonController
 from host import HIDHost
@@ -146,7 +146,7 @@ class HIDDaemon:
                 continue
 
             skip_delay = False
-            ensure_brcm_powered()
+            chip().ensure_powered()
 
             try:
                 # Use handed-off host from controller pairing if available
@@ -240,10 +240,7 @@ class HIDDaemon:
 async def main():
     setup_daemon_logging(config.log_file)
 
-    prepare_bt(
-        module_patterns=config.bt_module_patterns,
-        settle_time=config.bt_settle_time,
-    )
+    prepare_bt()
 
     daemon = HIDDaemon()
     controller = DaemonController(daemon)

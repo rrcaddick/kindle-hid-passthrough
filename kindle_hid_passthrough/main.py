@@ -44,7 +44,7 @@ async def pair_mode(protocol_filter: Protocol = None, sequential: bool = False):
     scanner = Scanner()
 
     try:
-        prepare_bt(transport_spec=scanner.transport_spec)
+        prepare_bt()
         await scanner.start()
 
         selected = None
