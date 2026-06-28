@@ -602,3 +602,41 @@ html {
     padding-top: 12px;
     border-top: 2px solid #000;
 }
+
+/* The sizes above are tuned for the 1072px Paperwhite. On narrower screens
+   (e.g. Kindle Basic 3, 600px) they render ~2x too big, so scale fonts and
+   fixed dimensions down to ~0.56 here. Percentage widths are left as-is. */
+@media screen and (max-width: 700px) {
+    body { font-size: 22px; padding: 4px 12px 6px 12px; }
+    .header h1 { font-size: 28px; }
+    .btn-close { min-width: 40px; min-height: 40px; padding: 6px 10px; font-size: 24px; }
+    .toggle-label { font-size: 24px; line-height: 34px; }
+    .toggle { width: 66px; height: 34px; border-width: 2px; padding: 2px; }
+    .toggle-knob { width: 24px; height: 24px; top: 2px; left: 2px; }
+    .toggle.on .toggle-knob { right: 2px; }
+    .section-label { font-size: 15px; letter-spacing: 2px; }
+    .scan-indicator { font-size: 15px; }
+    .device-row-name { font-size: 22px; }
+    .device-row-sub { font-size: 16px; }
+    .device-row-chevron { font-size: 30px; line-height: 38px; }
+    .available-name { font-size: 22px; }
+    .available-sub { font-size: 16px; }
+    .btn-pair { min-width: 78px; min-height: 40px; padding: 7px 13px; font-size: 19px; }
+    .btn { min-height: 42px; padding: 9px 16px; font-size: 21px; margin-bottom: 7px; }
+    .detail-label, .detail-value { font-size: 22px; }
+    .detail-mono { font-size: 19px; }
+    .off-message { font-size: 24px; padding-top: 44px; }
+    .off-hint { font-size: 19px; }
+    .footer { font-size: 15px; padding: 7px 12px 5px 12px; }
+    .device-empty { font-size: 20px; }
+    .message-bar { font-size: 20px; padding: 9px 12px; }
+    .dialog { padding: 18px; }
+    .dialog p { font-size: 22px; }
+    .dialog .dialog-addr, .pair-dialog .pair-addr { font-size: 20px; }
+    .pair-dialog { padding: 18px; }
+    .pair-dialog p { font-size: 22px; }
+    .log-title { font-size: 27px; }
+    .log-content { font-size: 12px; }
+    .log-viewer, .pair-log-viewer { height: 500px; }
+    .keyboard-test { font-size: 18px; min-height: 34px; }
+}
