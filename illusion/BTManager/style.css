@@ -603,9 +603,7 @@ html {
     border-top: 2px solid #000;
 }
 
-/* The sizes above are tuned for the 1072px Paperwhite. On narrower screens
-   (e.g. Kindle Basic 3, 600px) they render ~2x too big, so scale fonts and
-   fixed dimensions down to ~0.56 here. Percentage widths are left as-is. */
+/* Scale down for small screens (Basic 3, 600px); base sizes target the PW. */
 @media screen and (max-width: 700px) {
     body { font-size: 22px; padding: 4px 12px 6px 12px; }
     .header h1 { font-size: 28px; }
