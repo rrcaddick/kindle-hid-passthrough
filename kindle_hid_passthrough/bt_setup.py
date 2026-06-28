@@ -26,6 +26,7 @@ from logging_utils import log
 # Broadcom warm-handoff knobs
 BT_DEV_WAKE_PATH = '/proc/bluetooth/sleep/btwake'
 BT_SLEEP_PROTO_PATH = '/proc/bluetooth/sleep/proto'
+BT_ENABLE_PATH = '/proc/bluetooth/btenable'
 BTENABLE_LIPC = ['lipc-set-prop', 'com.lab126.btfd', 'BTenable', '1:1']
 BSA_WARMUP_TIMEOUT = 12.0   # seconds to wait for bsa_server after BTenable
 BSA_FIRMWARE_SETTLE = 2.0   # let bsa finish the .hcd download before we take over
@@ -278,12 +279,7 @@ def _wait_for_bsa():
 
 
 def _warm_up_chip():
-    """Have Amazon's BT stack bring the chip up (loads .hcd firmware, warms the
-    UART clock). This cold bring-up is timing-critical and wedges the kernel if
-    we attempt it ourselves; bsa_server does it safely.
-
-    Returns True once bsa_server is running (chip warm).
-    """
+    """Bring the chip up via Amazon's BT stack (it loads the firmware)."""
     if _pgrep_x('bsa_server'):
         log.info("bsa_server already running; BCM chip is warm")
         return True
@@ -293,9 +289,7 @@ def _warm_up_chip():
     if _wait_for_bsa():
         return True
 
-    # A previous handoff may have left btd frozen (SIGSTOP) with its bsa child
-    # killed. Unfreeze it first (otherwise initctl can't stop it and hangs),
-    # then restart so it will respawn bsa. The UART must be free here.
+    # unfreeze a btd left frozen by a prior handoff, else initctl restart hangs
     log.warning("bsa_server didn't start; recovering btd")
     for pid in _pgrep_x('btd'):
         try:
@@ -309,10 +303,7 @@ def _warm_up_chip():
 
 
 def _handoff_from_bsa(device_path):
-    """Take the warm UART from bsa_server: freeze btd so it can't respawn bsa,
-    SIGKILL bsa, and free the device. The chip stays warm because btenable is
-    left untouched (the chip keeps its firmware and clock state).
-    """
+    """Freeze btd, SIGKILL bsa, free the UART. The chip stays warm."""
     for pid in _pgrep_x('btd'):
         try:
             os.kill(pid, signal.SIGSTOP)
@@ -333,16 +324,7 @@ def _handoff_from_bsa(device_path):
 
 
 def wake_brcm_chip():
-    """Wake the warm BCM chip and keep it awake so it answers HCI.
-
-    MUST be called AFTER the UART transport is open: these writes wedge a cold
-    chip, but on the warm chip (firmware loaded by bsa, clock running) they are
-    safe. Two steps:
-      1. dev_wake=0  -> wake the chip out of bluesleep.
-      2. proto=0     -> disable bluesleep, so it doesn't sleep again mid-scan
-                        (otherwise it goes silent after ~20s and HCI times out).
-    No-op on non-Broadcom Kindles (the proc files don't exist).
-    """
+    """Wake the chip (dev_wake) and disable bluesleep. Call after the UART opens."""
     if not os.path.exists(BT_DEV_WAKE_PATH):
         return
     try:
@@ -361,13 +343,34 @@ def wake_brcm_chip():
         log.warning(f"Could not disable bluesleep: {e}")
 
 
-def _prepare_brcm(kindle):
-    """Prepare Broadcom BCM4343 hardware via warm handoff from bsa_server.
+def power_off_brcm_chip():
+    """Power the chip down (btenable=0) for BT-off. No-op off Broadcom."""
+    if not os.path.exists(BT_ENABLE_PATH):
+        return
+    try:
+        with open(BT_ENABLE_PATH, 'w') as f:
+            f.write('0')
+        log.info("BCM chip powered off (btenable=0)")
+    except OSError as e:
+        log.warning(f"Could not power off BCM chip: {e}")
 
-    bsa loads the firmware and warms the UART clock (the cold bring-up that
-    wedges the kernel if we do it ourselves); we then take the running UART.
-    The chip is woken later, once the transport is open (see wake_brcm_chip).
-    """
+
+def ensure_brcm_powered():
+    """Re-warm the chip if it was powered off (BT-off toggle). No-op otherwise."""
+    if not os.path.exists(BT_ENABLE_PATH):
+        return
+    try:
+        if open(BT_ENABLE_PATH).read().strip() != '0':
+            return
+    except OSError:
+        return
+    kindle = detect_kindle()
+    if kindle and kindle.transport_scheme == 'serial':
+        _prepare_brcm(kindle)
+
+
+def _prepare_brcm(kindle):
+    """Prepare Broadcom BCM4343 via warm handoff from bsa_server."""
     device_path = kindle.device_path
 
     if not os.path.exists(device_path):
