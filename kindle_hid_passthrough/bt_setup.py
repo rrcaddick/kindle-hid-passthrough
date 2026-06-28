@@ -203,14 +203,13 @@ def _is_device_free(device_path):
 
 
 def _extract_device_path(transport_spec):
-    """Extract the device path from a Bumble transport spec string."""
-    if not transport_spec:
-        return None
-    if transport_spec.startswith('file:'):
+    """Extract the device path from a Bumble file: transport spec string.
+
+    Only used for the MediaTek (file:) path; the Broadcom path uses
+    kindle.device_path directly.
+    """
+    if transport_spec and transport_spec.startswith('file:'):
         return transport_spec[5:]
-    if transport_spec.startswith('serial:'):
-        spec = transport_spec[7:]
-        return spec.split(',')[0]
     return None
 
 
@@ -224,15 +223,14 @@ def prepare_bt(transport_spec=None, module_patterns=None, settle_time=0.5):
       3. Verify /dev/stpbt is accessible
 
     For Broadcom Kindles (8th-10th gen):
-      1. Evict BSA processes holding the UART (via fuser)
-      2. Download .hcd firmware to chip over UART
-      3. Verify UART is accessible
+      1. Let bsa_server warm the chip (it loads the .hcd firmware)
+      2. Take the running UART from bsa (warm handoff)
 
     Args:
         transport_spec: Transport string (e.g. 'file:/dev/stpbt',
-                       'serial:/dev/ttymxc2,115200').
+                       'serial:/dev/ttymxc2,2000000,rtscts').
         module_patterns: List of module filename patterns to search for.
-        settle_time: Seconds to wait after evicting holders.
+        settle_time: Seconds to wait after evicting holders (MediaTek path).
 
     Returns:
         True if BT device is ready.
@@ -251,8 +249,8 @@ def prepare_bt(transport_spec=None, module_patterns=None, settle_time=0.5):
 
     log.info("Preparing Bluetooth hardware...")
 
-    if kindle and kindle.firmware_dir:
-        return _prepare_brcm(kindle, settle_time)
+    if kindle and kindle.transport_scheme == 'serial':
+        return _prepare_brcm(kindle)
 
     return _prepare_standard(device_path, module_patterns, settle_time)
 
@@ -363,7 +361,7 @@ def wake_brcm_chip():
         log.warning(f"Could not disable bluesleep: {e}")
 
 
-def _prepare_brcm(kindle, settle_time):
+def _prepare_brcm(kindle):
     """Prepare Broadcom BCM4343 hardware via warm handoff from bsa_server.
 
     bsa loads the firmware and warms the UART clock (the cold bring-up that

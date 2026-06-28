@@ -38,7 +38,6 @@ class KindleDefaults:
     transport_scheme: str = 'file'      # Bumble transport scheme ('file' or 'serial')
     baud_rate: Optional[int] = None     # Serial baud rate (for serial transport)
     flow_control: Optional[str] = None  # Serial flow control flag ('rtscts' or 'dsrdtr')
-    firmware_dir: Optional[str] = None  # BCM firmware directory (.hcd files)
 
 
 # --- Hardware profiles ---
@@ -59,7 +58,6 @@ _BRCM_HW = dict(
     transport_scheme='serial',
     baud_rate=2000000,
     flow_control='rtscts',
-    firmware_dir='/opt/brcm_4343w/bluetooth/firmware',
 )
 
 
@@ -166,7 +164,6 @@ def detect_kindle(serial: str = None) -> Optional[KindleDefaults]:
         transport_scheme=hw.get('transport_scheme', 'file'),
         baud_rate=hw.get('baud_rate'),
         flow_control=hw.get('flow_control'),
-        firmware_dir=hw.get('firmware_dir'),
     )
     log.info(f"Detected {name} (code 0x{device_code:X})")
     return defaults
