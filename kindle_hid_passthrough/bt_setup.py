@@ -344,15 +344,19 @@ def wake_brcm_chip():
 
 
 def power_off_brcm_chip():
-    """Power the chip down (btenable=0) for BT-off. No-op off Broadcom."""
+    """Power the chip down and reset btfd so the system BT icon clears (BT-off)."""
     if not os.path.exists(BT_ENABLE_PATH):
         return
     try:
+        if open(BT_ENABLE_PATH).read().strip() == '0':
+            return
         with open(BT_ENABLE_PATH, 'w') as f:
             f.write('0')
         log.info("BCM chip powered off (btenable=0)")
     except OSError as e:
         log.warning(f"Could not power off BCM chip: {e}")
+        return
+    _run(['initctl', 'restart', 'btd'])
 
 
 def ensure_brcm_powered():

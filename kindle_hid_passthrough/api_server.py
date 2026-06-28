@@ -120,6 +120,9 @@ class RequestHandler(BaseHTTPRequestHandler):
 
     def _handle_stop(self):
         controller = self._controller
+        if controller.daemon._suspended:
+            self._send_json({"ok": True, "message": "Already stopped"})
+            return
         controller.request_disconnect(suspend=True)
         self._send_json({"ok": True, "message": "Daemon stopped"})
 
