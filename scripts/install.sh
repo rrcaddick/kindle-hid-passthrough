@@ -2,6 +2,9 @@
 
 INSTALL_DIR="/mnt/us/kindle_hid_passthrough"
 
+# Directory holding this script, so sibling scripts resolve regardless of cwd.
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
 # True when the script is running from the install dir itself, so the
 # cp commands below would be a no-op (source == destination).
 in_install_dir()
@@ -72,7 +75,7 @@ setLayout()
 {
   printf "Enter layout code (e.g. fr, de, 'fr(oss)'): "
   read layout
-  /bin/sh setlayout.sh "$layout"
+  /bin/sh "$SCRIPT_DIR/setlayout.sh" "$layout"
 }
 
 installWAFApp()
