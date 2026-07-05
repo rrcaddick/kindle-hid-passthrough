@@ -11,5 +11,5 @@ env KINDLE_HID_BASE=/mnt/us/kindle_hid_passthrough
 console none
 
 script
-    exec /mnt/us/kindle_hid_passthrough/kindle-hid-passthrough --daemon >/dev/null 2>&1
+    exec /mnt/us/kindle_hid_passthrough/kindle-hid-passthrough --daemon >>/var/log/hid_passthrough.log 2>&1
 end script

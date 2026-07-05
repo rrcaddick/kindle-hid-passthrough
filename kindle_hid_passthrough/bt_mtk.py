@@ -6,7 +6,7 @@ import os
 import signal
 import time
 
-from bt_chip import BtChip, free_device, run
+from bt_chip import BtChip, run
 from config import config
 from logging_utils import log
 
@@ -14,6 +14,13 @@ DEFAULT_MODULE_PATTERNS = [
     'wmt_cdev_bt.ko',   # MediaTek (PW4/5, Kindle 10/11, Scribe)
     'bt_drv.ko',         # Older Freescale/NXP Kindles
 ]
+
+# Stock BT stack: respawn'd upstart jobs, so stop via upstart, never SIGKILL.
+_STOCK_BT_JOBS = ('acsbtfd', 'btmanagerd')
+
+# Shared Wi-Fi/CONSYS combo processes — killing one can drop Wi-Fi. Never touch.
+_CRITICAL_COMMS = ('wmt_service', 'mtk_wmtd', 'wifid', 'wifim',
+                   'stp_main', 'mtk_stp_psm', 'connfem')
 
 
 def _find_bt_module(patterns=None):
@@ -47,14 +54,44 @@ def _is_module_loaded(module_path):
     return False
 
 
-def _kill_holders_via_proc(device_path):
-    """SIGKILL processes holding device_path by scanning /proc (fuser fallback)."""
+def _proc_field(pid, name):
+    """Read /proc/<pid>/<name>, or b'' if unavailable."""
+    try:
+        with open(f'/proc/{pid}/{name}', 'rb') as f:
+            return f.read()
+    except OSError:
+        return b''
+
+
+def _holder_info(pid):
+    """Identity of a process holding a device: comm, cmdline, exe, uid."""
+    comm = _proc_field(pid, 'comm').decode(errors='replace').strip()
+    cmdline = (_proc_field(pid, 'cmdline')
+               .replace(b'\0', b' ').decode(errors='replace').strip())
+    try:
+        exe = os.readlink(f'/proc/{pid}/exe')
+    except OSError:
+        exe = ''
+    try:
+        uid = os.stat(f'/proc/{pid}').st_uid
+    except OSError:
+        uid = None
+    return {'pid': pid, 'comm': comm, 'cmdline': cmdline, 'exe': exe, 'uid': uid}
+
+
+def _describe(h):
+    return (f"pid={h['pid']} comm={h['comm'] or '?'} uid={h['uid']} "
+            f"exe={h['exe'] or '?'} cmd='{h['cmdline']}'")
+
+
+def _find_holders(device_path):
+    """Scan /proc for processes holding device_path (excluding self)."""
     my_pid = os.getpid()
-    killed = 0
+    holders = []
     try:
         pids = [e for e in os.listdir('/proc') if e.isdigit()]
     except OSError:
-        return 0
+        return holders
     for pid in pids:
         if int(pid) == my_pid:
             continue
@@ -65,18 +102,55 @@ def _kill_holders_via_proc(device_path):
             continue
         for fd in fds:
             try:
-                target = os.readlink(f'{fd_dir}/{fd}')
+                if os.readlink(f'{fd_dir}/{fd}') == device_path:
+                    holders.append(_holder_info(pid))
+                    break
             except OSError:
                 continue
-            if target == device_path:
-                try:
-                    os.kill(int(pid), signal.SIGKILL)
-                    killed += 1
-                    log.info(f"Killed PID {pid} holding {device_path}")
-                except OSError as e:
-                    log.warning(f"Could not kill PID {pid}: {e}")
-                break
-    return killed
+    return holders
+
+
+def _graceful_kill(h, settle, device_path):
+    """SIGTERM an unknown holder, then SIGKILL only if it clings to the node."""
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        if _is_device_free(device_path):
+            return
+        try:
+            os.kill(int(h['pid']), sig)
+            log.info(f"Sent {sig.name} to unknown holder {_describe(h)}")
+        except OSError as e:
+            log.warning(f"Could not signal pid={h['pid']}: {e}")
+            return
+        time.sleep(settle)
+
+
+def _evict_holders(device_path, settle):
+    """Free device_path: stop stock BT via upstart, spare Wi-Fi, SIGTERM the rest."""
+    holders = _find_holders(device_path)
+    if not holders:
+        return
+    for h in holders:
+        log.info(f"{device_path} held by {_describe(h)}")
+
+    critical = [h for h in holders if h['comm'] in _CRITICAL_COMMS]
+    if critical:
+        for h in critical:
+            log.error(f"Refusing to evict critical connectivity process {_describe(h)}")
+        return
+
+    stock_jobs = {h['comm'] for h in holders if h['comm'] in _STOCK_BT_JOBS}
+    if 'acsbtfd' in stock_jobs:
+        stock_jobs.add('btmanagerd')
+    for job in stock_jobs:
+        log.info(f"Stopping stock BT service '{job}' via upstart")
+        if not run(['/sbin/initctl', 'stop', job]):
+            log.warning(f"'initctl stop {job}' failed")
+    if stock_jobs:
+        time.sleep(settle)
+
+    for h in holders:
+        if h['comm'] not in _STOCK_BT_JOBS and not _is_device_free(device_path):
+            _graceful_kill(h, settle, device_path)
 
 
 def _is_device_free(device_path):
@@ -118,16 +192,8 @@ class MtkChip(BtChip):
             log.info(f"{device_path} is available")
             return True
 
-        log.info(f"{device_path} is busy, evicting holder...")
-        if free_device(device_path):
-            time.sleep(settle)
-        if _is_device_free(device_path):
-            log.info(f"{device_path} is now available")
-            return True
-
-        log.warning(f"{device_path} still busy, scanning /proc for holders...")
-        if _kill_holders_via_proc(device_path):
-            time.sleep(settle)
+        log.info(f"{device_path} is busy, identifying and evicting holders...")
+        _evict_holders(device_path, settle)
         if _is_device_free(device_path):
             log.info(f"{device_path} is now available")
             return True
