@@ -316,6 +316,17 @@ EOF
   fi
   rm -f "$SCRIPTLET_DEST"
 
+  echo " -> Purging WAF cache"
+  # Graceful appmgrd unload, not pkill (pkill makes appmgrd report a crash).
+  lipc-set-prop com.lab126.appmgrd stop "app://$APP_ID" 2>/dev/null
+  MESQUITE_DIR="/var/local/mesquite"
+  if [ -d "$MESQUITE_DIR" ]; then
+    for d in "$MESQUITE_DIR"/*[Bb][Tt][Mm]anager* "$MESQUITE_DIR/BT Manager" "$MESQUITE_DIR/$APP_ID"; do
+      [ -e "$d" ] || continue
+      rm -rf "$d"
+    done
+  fi
+
   /usr/sbin/mntroot ro
 
   uninstallButtonMapper
