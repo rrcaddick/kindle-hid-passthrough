@@ -51,6 +51,28 @@ EOF
     fi
 }
 
+# ---- Purge stale WAF cache ----
+
+purge_waf_cache() {
+    # mesquite caches the parsed chrome config and rendered assets per-app under
+    # /var/local/mesquite. That cache survives reinstalls and in-place upgrades,
+    # so an old entry keeps the previous chrome (e.g. a hidden status bar) even
+    # after the app files change. The app persists no client state, so purge on
+    # every launch to guarantee config.xml changes take effect.
+    MESQUITE_DIR="/var/local/mesquite"
+    # Ask appmgrd to unload the app so the next launch spawns fresh and re-reads
+    # config.xml. Use the graceful stop, not pkill: killing mesquite out from
+    # under appmgrd makes it report a crash ("Application Error") to the user.
+    lipc-set-prop com.lab126.appmgrd stop "app://$APP_ID" 2>/dev/null
+    sleep 1
+    [ -d "$MESQUITE_DIR" ] || return
+    for d in "$MESQUITE_DIR"/*[Bb][Tt][Mm]anager* "$MESQUITE_DIR/$APP_NAME" "$MESQUITE_DIR/$APP_ID"; do
+        [ -e "$d" ] || continue
+        rm -rf "$d"
+        log_msg "Purged WAF cache: $d"
+    done
+}
+
 # ---- Start helper daemon ----
 
 start_helper() {
@@ -84,6 +106,9 @@ log_msg "BTManager scriptlet starting"
 
 # Install/update WAF files
 install_waf
+
+# Drop stale WAF cache so config.xml chrome changes render
+purge_waf_cache
 
 # Start the HTTP helper
 start_helper

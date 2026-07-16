@@ -46,9 +46,30 @@ echo "2. Setting permissions..."
 chmod +x "$SCRIPTLET"
 echo "   Done"
 
+# ---- Purge stale WAF cache ----
+#
+# mesquite caches the parsed chrome config and rendered assets per-app under
+# /var/local/mesquite. That cache survives an uninstall/reinstall, so an old
+# entry keeps the previous chrome (e.g. a hidden status bar) even after the
+# app files are updated. Purge it on every install so config.xml changes take.
+echo "3. Purging stale WAF cache..."
+MESQUITE_DIR="/var/local/mesquite"
+# Unload any running instance via appmgrd so the next launch re-reads config.xml.
+# Not pkill: killing mesquite makes appmgrd report a crash to the user.
+lipc-set-prop com.lab126.appmgrd stop "app://$APP_ID" 2>/dev/null
+sleep 1
+if [ -d "$MESQUITE_DIR" ]; then
+    for d in "$MESQUITE_DIR"/*[Bb][Tt][Mm]anager* "$MESQUITE_DIR/BT Manager" "$MESQUITE_DIR/$APP_ID"; do
+        [ -e "$d" ] || continue
+        rm -rf "$d"
+        echo "   Removed $d"
+    done
+fi
+echo "   Done"
+
 # ---- Register in appreg.db ----
 
-echo "3. Registering app..."
+echo "4. Registering app..."
 if [ -f "$APPREG_DB" ]; then
     # Rewritten every time, an existing registration can still be pointing at a
     # stale command or app path after an update.
@@ -71,14 +92,14 @@ fi
 
 # ---- Install scriptlet ----
 
-echo "4. Installing scriptlet..."
+echo "5. Installing scriptlet..."
 cp "$SCRIPTLET" "$SCRIPTLET_DEST"
 chmod +x "$SCRIPTLET_DEST"
 echo "   Installed to $SCRIPTLET_DEST"
 
 # ---- Start helper ----
 
-echo "5. Starting daemon..."
+echo "6. Starting daemon..."
 # Stop existing instances
 /sbin/stop hid-passthrough 2>/dev/null
 pkill -f "ld-linux-armhf." 2>/dev/null
