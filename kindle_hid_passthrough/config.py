@@ -140,6 +140,9 @@ class Config:
         # Bluetooth hardware setup
         self.bt_module_patterns = self._get_list('bluetooth', 'module_patterns', None)
         self.bt_settle_time = float(self._get('bluetooth', 'settle_time', '0.5'))
+        self.bt_stock_settle_timeout = float(
+            self._get('bluetooth', 'stock_settle_timeout', '45'))
+        self.bt_stop_timeout = float(self._get('bluetooth', 'stop_timeout', '10'))
 
         # Device identity
         self.device_name = self._get('device', 'name', 'Kindle-HID')

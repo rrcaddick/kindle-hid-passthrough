@@ -4,6 +4,7 @@
 import glob
 import os
 import signal
+import subprocess
 import time
 
 from bt_chip import BtChip, run
@@ -21,6 +22,10 @@ _STOCK_BT_JOBS = ('acsbtfd', 'btmanagerd')
 # Shared Wi-Fi/CONSYS combo processes — killing one can drop Wi-Fi. Never touch.
 _CRITICAL_COMMS = ('wmt_service', 'mtk_wmtd', 'wifid', 'wifim',
                    'stp_main', 'mtk_stp_psm', 'connfem')
+
+# Upstart rests in these; everything else (pre-start, spawned, stopping, ...) is
+# a transition, and evicting a job mid-transition leaves CONSYS half-configured.
+_SETTLED_STATES = ('running', 'waiting')
 
 
 def _find_bt_module(patterns=None):
@@ -110,6 +115,66 @@ def _find_holders(device_path):
     return holders
 
 
+def _job_state(job):
+    """(goal, state) of an upstart job, or (None, None) if it isn't known here."""
+    try:
+        r = subprocess.run(['/sbin/initctl', 'status', job],
+                           capture_output=True, timeout=5)
+    except Exception:
+        return (None, None)
+    if r.returncode != 0:
+        return (None, None)
+    head = r.stdout.decode(errors='replace').split('\n')[0].split(',')[0]
+    fields = head.split()
+    if not fields or '/' not in fields[-1]:
+        return (None, None)
+    goal, _, state = fields[-1].partition('/')
+    return (goal, state)
+
+
+def _wait_for_settle(jobs, timeout, poll=0.5):
+    """Block until every job leaves its transitional state, or timeout expires.
+
+    Starting on a boot event only says the CONSYS chip powered up, not that the
+    stock BT stack finished claiming it. Evicting acsbtfd mid-init flaps the
+    radio Wi-Fi shares, which is what boot-loops a Scribe (#87).
+    """
+    deadline = time.monotonic() + timeout
+    announced = False
+    while True:
+        unsettled = []
+        for job in jobs:
+            goal, state = _job_state(job)
+            if state is not None and state not in _SETTLED_STATES:
+                unsettled.append(f'{job} {goal}/{state}')
+        if not unsettled:
+            if announced:
+                log.info("Stock BT stack settled")
+            return True
+        if time.monotonic() >= deadline:
+            log.warning(f"Stock BT stack still unsettled after {timeout:.0f}s: "
+                        f"{', '.join(unsettled)}")
+            return False
+        if not announced:
+            log.info(f"Waiting for stock BT stack to settle: {', '.join(unsettled)}")
+            announced = True
+        time.sleep(poll)
+
+
+def _wait_for_stopped(job, timeout, poll=0.5):
+    """Block until an upstart job reaches stop/waiting, or timeout expires."""
+    deadline = time.monotonic() + timeout
+    while True:
+        goal, state = _job_state(job)
+        if state is None or (goal, state) == ('stop', 'waiting'):
+            return True
+        if time.monotonic() >= deadline:
+            log.warning(f"'{job}' did not reach stop/waiting in {timeout:.0f}s "
+                        f"(now {goal}/{state})")
+            return False
+        time.sleep(poll)
+
+
 def _graceful_kill(h, settle, device_path):
     """SIGTERM an unknown holder, then SIGKILL only if it clings to the node."""
     for sig in (signal.SIGTERM, signal.SIGKILL):
@@ -124,7 +189,7 @@ def _graceful_kill(h, settle, device_path):
         time.sleep(settle)
 
 
-def _evict_holders(device_path, settle):
+def _evict_holders(device_path, settle, stop_timeout=10.0):
     """Free device_path: stop stock BT via upstart, spare Wi-Fi, SIGTERM the rest."""
     holders = _find_holders(device_path)
     if not holders:
@@ -145,6 +210,8 @@ def _evict_holders(device_path, settle):
         log.info(f"Stopping stock BT service '{job}' via upstart")
         if not run(['/sbin/initctl', 'stop', job]):
             log.warning(f"'initctl stop {job}' failed")
+    for job in stock_jobs:
+        _wait_for_stopped(job, stop_timeout)
     if stock_jobs:
         time.sleep(settle)
 
@@ -192,8 +259,14 @@ class MtkChip(BtChip):
             log.info(f"{device_path} is available")
             return True
 
+        log.info(f"{device_path} is busy, waiting for the stock BT stack to settle...")
+        _wait_for_settle(_STOCK_BT_JOBS, config.bt_stock_settle_timeout)
+        if _is_device_free(device_path):
+            log.info(f"{device_path} is available")
+            return True
+
         log.info(f"{device_path} is busy, identifying and evicting holders...")
-        _evict_holders(device_path, settle)
+        _evict_holders(device_path, settle, config.bt_stop_timeout)
         if _is_device_free(device_path):
             log.info(f"{device_path} is now available")
             return True
