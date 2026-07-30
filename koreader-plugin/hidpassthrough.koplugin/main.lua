@@ -12,10 +12,13 @@ local InfoMessage = require("ui/widget/infomessage")
 local InputContainer = require("ui/widget/container/inputcontainer")
 local LuaSettings = require("luasettings")
 local Menu = require("ui/widget/menu")
+local PluginShare = require("pluginshare")
+local PowerD = Device:getPowerDevice()
 local Screen = require("device").screen
 local TextViewer = require("ui/widget/textviewer")
 local UIManager = require("ui/uimanager")
 local logger = require("logger")
+local time = require("ui/time")
 local rapidjson = require("rapidjson")
 local util = require("util")
 local ffiutil = require("ffi/util")
@@ -1148,11 +1151,31 @@ function HIDPassthrough:onHIDPassthroughToggle()
     self:_runActionAsync(label, self.toggle)
 end
 
+-- AutoSuspend stops re-arming powerd's t1 timeout when auto-suspend is off (#136).
+local T1_RESET_INTERVAL = 4 * 60
+local last_t1_reset = nil
+
+function HIDPassthrough:onInputEvent()
+    if not PowerD.resetT1Timeout then return end
+    local auto_suspend = G_reader_settings:readSetting("auto_suspend_timeout_seconds")
+    if auto_suspend == nil or auto_suspend > 0 or PluginShare.keepalive then return end
+    if PowerD:isCharging() and not PowerD:isCharged() then return end
+
+    local now = UIManager:getElapsedTimeSinceBoot()
+    if last_t1_reset and time.to_number(now - last_t1_reset) < T1_RESET_INTERVAL then
+        return
+    end
+    last_t1_reset = now
+    logger.dbg("HIDPassthrough: re-armed powerd's t1 timeout")
+    PowerD:resetT1Timeout()
+end
+
 function HIDPassthrough:init()
     self:onDispatcherRegisterActions()
     self.ui.menu:registerToMainMenu(self)
     self:_extendEventMap()
     self:registerKeyEvents()
+    UIManager.event_hook:registerWidget("InputEvent", self)
     -- A pad may already be connected.
     self:_scanJoysticks()
 end
