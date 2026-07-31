@@ -27,7 +27,7 @@ BT HID Device ──┤                                          ──>  Bumble
 ## Features
 
 - **Generic HID support** - Works with any Bluetooth HID device (Classic or BLE)
-- **Mixed protocol support** - Configure both BLE and Classic devices simultaneously
+- **Multi-device support** - Multiple devices connected at once, BLE and Classic mixed
 - **UHID passthrough** - Devices appear as native Linux input devices
 - **UDEV keyboard device** - Devices can be treated as keyboard and keypresses used for text input.
 - **Auto-reconnection** - Daemon mode with automatic reconnection
@@ -148,7 +148,7 @@ Paired devices are stored in `devices.conf`:
 5C:2B:3E:50:4F:04/P ble BLE-M3
 ```
 
-**Mixed Protocol Support**: You can configure both BLE and Classic devices. The daemon automatically detects mixed protocols and uses a unified host that handles both simultaneously - the first device to connect wins.
+**Multi-device support**: Every configured device connects and stays connected at the same time, across both protocols. Sessions are tracked per address, so a keyboard over Classic and a mouse over BLE (or several of each) work together.
 
 ## Mapping Inputs to Specific Actions
 

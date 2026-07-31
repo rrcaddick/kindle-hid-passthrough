@@ -129,9 +129,8 @@ async def pair_mode(protocol_filter: Protocol = None, sequential: bool = False):
         await host.cleanup()
 
 
-async def run_mode(address: str):
+async def run_mode():
     """Normal run mode - connect and forward reports."""
-    log.info(f"Connecting to {address}")
     host = HIDHost()
 
     try:
@@ -206,7 +205,7 @@ def main():
     if not address:
         all_devices = config.get_all_devices()
         if all_devices:
-            # Show all configured devices
+            # Show all configured devices (the host reads them from config)
             if len(all_devices) == 1:
                 addr, protocol, name = all_devices[0]
                 display = f"{name} ({addr})" if name else addr
@@ -216,7 +215,6 @@ def main():
                 for addr, protocol, name in all_devices:
                     display = f"{name} ({addr})" if name else addr
                     log.info(f"  - [{protocol.value}] {display}")
-            # Use first device's address for compatibility (unified host reads all from config)
             address = all_devices[0][0]
         else:
             if args.daemon:
@@ -230,7 +228,7 @@ def main():
         # Use daemon module for proper reconnect handling
         asyncio.run(daemon_main())
     else:
-        asyncio.run(run_mode(address))
+        asyncio.run(run_mode())
 
 
 if __name__ == '__main__':
