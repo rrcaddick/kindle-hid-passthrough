@@ -68,17 +68,7 @@ class DaemonController:
         }
 
         conn = self.daemon.connection_state
-        if conn.get("connected"):
-            status["connected_device"] = conn.get("address")
-            status["connected_protocol"] = conn.get("protocol")
-            status["connected_name"] = conn.get("name")
-            status["hid_ready"] = conn.get("hid_ready", False)
-            if conn.get("uhid_name"):
-                status["uhid_name"] = conn["uhid_name"]
-            if conn.get("input_paths"):
-                status["input_paths"] = conn["input_paths"]
-            if conn.get("descriptor_size"):
-                status["descriptor_size"] = conn["descriptor_size"]
+        status["connections"] = conn.get("connections", [])
 
         return status
 
@@ -253,11 +243,11 @@ class DaemonController:
     # ---- Remove ----
 
     def request_remove(self, address: str) -> dict:
-        """Remove a device from config, clear its cache, and disconnect."""
+        """Remove a device from config, clear its cache, and disconnect it."""
         result = config.remove_device(address)
         if result["removed"]:
             DeviceCache(config.cache_dir).clear(normalize_addr(address))
-            self.request_disconnect()
+            self.request_disconnect(address=address)
         return result
 
     # ---- Clear Cache ----
@@ -307,23 +297,24 @@ class DaemonController:
 
     # ---- Disconnect / Stop ----
 
-    def request_disconnect(self, suspend=False):
-        """From HTTP thread: drop connection.
+    def request_disconnect(self, suspend=False, address=None):
+        """From HTTP thread: drop one connection, or all.
 
-        suspend=False: drop connection, daemon keeps running (reconnect loop).
+        address given: drop that device's session, daemon keeps running.
+        address None:  drop every session (reconnect loops bring them back).
         suspend=True:  suspend daemon entirely (/stop).
         """
         asyncio.run_coroutine_threadsafe(
-            self._do_disconnect(suspend), self.loop
+            self._do_disconnect(suspend, address), self.loop
         )
 
-    async def _do_disconnect(self, suspend):
+    async def _do_disconnect(self, suspend, address=None):
         async with self._op_lock:
             try:
                 if suspend:
                     await self.daemon.suspend()
                     chip().power_off()
                 else:
-                    await self.daemon.disconnect()
+                    await self.daemon.disconnect(address)
             except Exception as e:
                 logger.error(f"Disconnect failed: {errstr(e)}")

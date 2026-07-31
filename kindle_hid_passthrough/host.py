@@ -29,11 +29,88 @@ class DeviceConfig:
     name: Optional[str] = None
 
 
+class DeviceSession:
+    """Live state for one connected device, keyed by normalized address."""
+
+    def __init__(self, address: str, protocol: Protocol, connection):
+        self.address = address
+        self.raw_address = str(connection.peer_address)
+        self.protocol = protocol
+        self.connection = connection
+        self.peer = None
+        self.channels = None
+        self.name = None
+        self.report_map: Optional[bytes] = None
+        self.hid_reports = []
+        self.uhid_device = None
+        self.is_pointer = False
+        self.last_report = None
+        self.setup_task = None
+        self.closed = False
+        self.teardown_done = asyncio.Event()
+        self.auth_failure = False
+        self.vc_unplug = False
+
+    def is_alive(self) -> bool:
+        conn = self.connection
+        if conn is None:
+            return False
+        if not hasattr(conn, 'handle') or conn.handle is None:
+            return False
+        if getattr(conn, 'is_disconnected', False):
+            return False
+        return True
+
+    def state_dict(self) -> dict:
+        entry = {
+            "address": self.address,
+            "protocol": self.protocol.value,
+            "name": self.name,
+            "hid_ready": self.uhid_device is not None,
+        }
+        if self.uhid_device:
+            entry["uhid_name"] = self.uhid_device.name
+            if self.uhid_device.input_paths:
+                entry["input_paths"] = self.uhid_device.input_paths
+        if self.report_map:
+            entry["descriptor_size"] = len(self.report_map)
+        return entry
+
+    async def cleanup(self):
+        """Idempotent release of session-owned resources."""
+        if self.closed:
+            await self.teardown_done.wait()
+            return
+        self.closed = True
+        try:
+            if self.uhid_device:
+                try:
+                    self.uhid_device.destroy()
+                except Exception:
+                    pass
+                self.uhid_device = None
+            if self.channels:
+                if self.is_alive():
+                    await self.channels.disconnect()
+                self.channels = None
+            if self.is_alive():
+                try:
+                    await asyncio.wait_for(self.connection.disconnect(), timeout=2.0)
+                except asyncio.TimeoutError:
+                    log.warning(f"Disconnect timed out for {self.address}")
+                except Exception as e:
+                    log.debug(f"Disconnect cleanup: {e}")
+            self.connection = None
+            self.peer = None
+        finally:
+            self.teardown_done.set()
+
+
 class HIDHost(ClassicMixin, BLEMixin):
     """HID Host supporting both BLE and Classic Bluetooth.
 
     Protocol-specific handlers live in ClassicMixin and BLEMixin.
-    This class owns init, start, run, pairing dispatch, and cleanup.
+    This class owns init, start, run, sessions, pairing dispatch, and cleanup.
     """
 
     PROTOCOL_NAME = "HID"
@@ -41,24 +118,19 @@ class HIDHost(ClassicMixin, BLEMixin):
     ACTIVE_DELAY = 2.0
     ACTIVE_RETRY_INTERVAL = 5.0
     ACTIVE_CONNECT_TIMEOUT = 10
+    FIRST_SESSION_TIMEOUT = 60.0
+    SETUP_TIMEOUT = 45.0
 
     def __init__(self, transport_spec: str = None):
         self.transport_spec = transport_spec or config.transport
         self.transport = None
         self.device = None
-        self.connection = None
-        self.peer = None
 
-        self._classic_channels = None
+        self.sessions = {}
+        self._pairing_session = None
         self._classic_psm_registered = False
-        self.connected_protocol = None
 
         self._connection_tasks: set = set()
-
-        self.current_device_address = None
-        self.device_name = None
-        self.report_map: Optional[bytes] = None
-        self.hid_reports = []
 
         self.classic_devices: List[DeviceConfig] = []
         self.ble_devices: List[DeviceConfig] = []
@@ -68,39 +140,19 @@ class HIDHost(ClassicMixin, BLEMixin):
         self.keystore = create_keystore(config.pairing_keys_file)
         self.device_cache = DeviceCache(config.cache_dir)
 
-        self.uhid_device = None
-        self._is_pointer = False
-        # Set by the daemon: called with True when a mouse/pointer device
-        # gets its UHID device, False when it goes away (drives the cursor).
+        # Set by the daemon: called with True when the first pointer device
+        # gets its UHID device, False when the last goes away (drives the cursor).
         self.on_pointer_change = None
 
-        self._disconnection_event = None
-        self._connection_future = None
-        self._last_report = None
-        self._auth_failure_address = None
-        self._virtual_cable_unplug_address = None
+        self._sessions_changed = None
         self._radio_lock = None
 
     @property
     def connection_state(self) -> dict:
         """Current connection state as a dict for API consumers."""
-        if not self._is_connection_alive():
-            return {"connected": False}
-
-        state = {
-            "connected": True,
-            "address": normalize_addr(self.current_device_address) if self.current_device_address else None,
-            "protocol": self.connected_protocol.value if self.connected_protocol else None,
-            "name": self.device_name,
-            "hid_ready": self.uhid_device is not None,
-        }
-        if self.uhid_device:
-            state["uhid_name"] = self.uhid_device.name
-            if self.uhid_device.input_paths:
-                state["input_paths"] = self.uhid_device.input_paths
-        if self.report_map:
-            state["descriptor_size"] = len(self.report_map)
-        return state
+        connections = [s.state_dict() for s in list(self.sessions.values())
+                       if s.is_alive()]
+        return {"connected": bool(connections), "connections": connections}
 
     def _parse_devices(self):
         """Parse devices from config and group by protocol."""
@@ -117,13 +169,17 @@ class HIDHost(ClassicMixin, BLEMixin):
 
         log.info(f"Devices: {len(self.classic_devices)} Classic, {len(self.ble_devices)} BLE")
 
-    async def start(self):
+    async def start(self, pairing: bool = False):
         """Initialize the Bumble device with both protocols."""
         log.info(f"HID Host v{get_version()}")
 
         def configure(device):
             device.classic_enabled = bool(self.classic_devices)
             device.le_enabled = bool(self.ble_devices)
+            if pairing:
+                # No inbound links while pairing; run mode re-enables page scan.
+                device.connectable = False
+                device.discoverable = False
             device.keystore = self.keystore
             device.pairing_config_factory = create_pairing_config
             if self.classic_devices:
@@ -209,9 +265,8 @@ class HIDHost(ClassicMixin, BLEMixin):
         return f"{name} ({addr})" if name else addr
 
     async def run(self):
-        """Main run loop - handle both protocols concurrently."""
-        self._disconnection_event = asyncio.Event()
-        self._connection_future = asyncio.get_event_loop().create_future()
+        """Main run loop - serve all configured devices concurrently."""
+        self._sessions_changed = asyncio.Event()
         self._radio_lock = asyncio.Lock()
 
         self._parse_devices()
@@ -223,6 +278,10 @@ class HIDHost(ClassicMixin, BLEMixin):
                 if cache and 'report_map' in cache:
                     log.info(f"Cached descriptor for {self._format_device(dev.address)}")
 
+        await self._serve()
+
+    async def _serve(self):
+        """Run the protocol handlers and watchdog until failure or cancel."""
         tasks = []
 
         if self.classic_devices:
@@ -241,43 +300,136 @@ class HIDHost(ClassicMixin, BLEMixin):
             log.error("No devices configured")
             return
 
-        log.info(f"Waiting for connection (Classic: {len(self.classic_devices)}, BLE: {len(self.ble_devices)})")
+        log.info(f"Serving devices (Classic: {len(self.classic_devices)}, BLE: {len(self.ble_devices)})")
+
+        tasks.append(asyncio.create_task(
+            self._session_watchdog(), name="session_watchdog"))
 
         try:
-            await asyncio.wait_for(self._connection_future, timeout=60.0)
-        except asyncio.TimeoutError:
-            log.warning("Connection timeout - no device connected")
-            raise InvalidStateError("No device connected within timeout")
+            done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+            for task in done:
+                task.result()
+            raise InvalidStateError(
+                f"{next(iter(done)).get_name()} exited unexpectedly")
         finally:
             for task in tasks:
                 if not task.done():
                     task.cancel()
                     try:
                         await task
-                    except asyncio.CancelledError:
+                    except (asyncio.CancelledError, Exception):
                         pass
 
-        if self.connected_protocol == Protocol.CLASSIC:
-            await self._handle_classic_connection()
-        else:
-            await self._handle_ble_connection()
-
-        proto_name = self.connected_protocol.value.upper()
-        log.success(f"\n[{proto_name}] Receiving HID reports. Press Ctrl+C to exit.")
-
-        # Daemon owns the reconnect + stale-key-clear policy: on auth
-        # failure it reads get_auth_failure_address(), removes the key,
-        # and restarts us on a fresh transport. Only a Classic auth
-        # failure while BLE is connected is absorbed here.
+    async def _session_watchdog(self):
+        """Ask the daemon for a transport rebuild when idle too long."""
         while True:
-            await self._disconnection_event.wait()
+            self._sessions_changed.clear()
+            if not self.sessions:
+                try:
+                    await asyncio.wait_for(
+                        self._sessions_changed.wait(),
+                        timeout=self.FIRST_SESSION_TIMEOUT)
+                except asyncio.TimeoutError:
+                    log.warning("Connection timeout - no device connected")
+                    raise InvalidStateError("No device connected within timeout")
+            else:
+                await self._sessions_changed.wait()
 
-            if self._auth_failure_address and self.connected_protocol == Protocol.BLE and self.connection:
-                log.info("[Classic] Auth failure ignored - BLE connection is active")
-                self._auth_failure_address = None
-                self._disconnection_event.clear()
-                continue
-            break
+    def _notify_sessions_changed(self):
+        if self._sessions_changed:
+            self._sessions_changed.set()
+
+    def _track_task(self, task):
+        self._connection_tasks.add(task)
+        task.add_done_callback(self._connection_tasks.discard)
+        return task
+
+    # ==================== SESSIONS ====================
+
+    def _new_session(self, address: str, protocol: Protocol, connection) -> DeviceSession:
+        """Session factory for the protocol mixins (avoids circular imports)."""
+        return DeviceSession(address, protocol, connection)
+
+    def _register_session(self, session: DeviceSession):
+        self.sessions[session.address] = session
+        self._notify_sessions_changed()
+        session.connection.on(
+            'disconnection',
+            lambda reason: self._on_session_disconnection(session, reason))
+
+    async def _reject_connection(self, connection):
+        try:
+            await connection.disconnect()
+        except Exception:
+            pass
+
+    def _on_session_disconnection(self, session: DeviceSession, reason):
+        proto = session.protocol.value.upper()
+        log.warning(f"[{proto}] Device disconnected: {session.address} (reason={reason})")
+
+        if reason == 5 and session.protocol == Protocol.CLASSIC:
+            log.info("[Classic] Authentication failure - will clear stale key and retry")
+            session.auth_failure = True
+
+        self._track_task(asyncio.create_task(self._teardown_session(session)))
+
+    async def _run_session_setup(self, session: DeviceSession, setup):
+        """Drive a session's HID setup, tearing it down on failure."""
+        try:
+            await asyncio.wait_for(setup, timeout=self.SETUP_TIMEOUT)
+        except asyncio.CancelledError:
+            raise
+        except asyncio.TimeoutError:
+            log.warning(f"Setup timed out for {self._format_device(session.address)}")
+            await self._teardown_session(session)
+        except Exception as e:
+            log.warning(f"Setup failed for {self._format_device(session.address)}: {e}")
+            await self._teardown_session(session)
+
+    async def _teardown_session(self, session: DeviceSession):
+        """End one session and apply its post-disconnect policy."""
+        if self.sessions.get(session.address) is session:
+            del self.sessions[session.address]
+            self._notify_sessions_changed()
+
+        setup = session.setup_task
+        if setup and not setup.done() and setup is not asyncio.current_task():
+            setup.cancel()
+            try:
+                await setup
+            except (asyncio.CancelledError, Exception):
+                pass
+
+        if session.closed:
+            await session.teardown_done.wait()
+            return
+        was_pointer = session.is_pointer and session.uhid_device is not None
+        await session.cleanup()
+        if was_pointer and self._pointer_count() == 0:
+            self._notify_pointer(False)
+
+        if session.auth_failure:
+            log.info(f"Auth failure for {session.address}, clearing stale key")
+            config.remove_pairing_key(session.address)
+        if session.vc_unplug:
+            log.info(f"Virtual cable unplugged by {session.address}, removing device")
+            config.remove_device(session.address)
+
+        self._parse_devices()
+        await self._load_keystore_addresses()
+
+    async def end_session(self, address: str = None):
+        """Disconnect one session by address, or all when address is None."""
+        if address is None:
+            targets = list(self.sessions.values())
+        else:
+            session = self.sessions.get(normalize_addr(address))
+            targets = [session] if session else []
+        if not targets:
+            log.info("No matching connection to disconnect")
+            return
+        for session in targets:
+            await self._teardown_session(session)
 
     # ==================== PAIRING ====================
 
@@ -288,14 +440,12 @@ class HIDHost(ClassicMixin, BLEMixin):
 
         self._parse_devices()
 
-        if protocol == Protocol.CLASSIC:
-            self.classic_devices = [DeviceConfig(address=address, protocol=protocol, name=name)]
-            self.ble_devices = []
-        else:
-            self.ble_devices = [DeviceConfig(address=address, protocol=protocol, name=name)]
-            self.classic_devices = []
+        bucket = self.classic_devices if protocol == Protocol.CLASSIC else self.ble_devices
+        norm = normalize_addr(address)
+        if not any(d.address != '*' and normalize_addr(d.address) == norm for d in bucket):
+            bucket.append(DeviceConfig(address=address, protocol=protocol, name=name))
 
-        await self.start()
+        await self.start(pairing=True)
 
         if protocol == Protocol.CLASSIC:
             return await self._pair_classic(address)
@@ -303,67 +453,57 @@ class HIDHost(ClassicMixin, BLEMixin):
             return await self._pair_ble(address)
 
     async def continue_after_pairing(self):
-        """Continue into run mode after successful pairing."""
-        if not self.connected_protocol:
+        """Serve all configured devices, adopting the paired session."""
+        session = self._pairing_session
+        if not session:
             raise InvalidStateError("No paired device - call pair_device first")
+        self._pairing_session = None
 
-        if self.connected_protocol == Protocol.CLASSIC and not self.connection:
-            raise InvalidStateError("No connection - call pair_device first")
+        self._sessions_changed = asyncio.Event()
+        self._radio_lock = asyncio.Lock()
 
-        self._disconnection_event = asyncio.Event()
-
-        if self.connection:
-            self.connection.on('disconnection', self._on_disconnection)
-
-        if self.connected_protocol == Protocol.CLASSIC:
-            await self._continue_classic_after_pairing()
+        if session.is_alive():
+            self._register_session(session)
+            if session.protocol == Protocol.CLASSIC:
+                await self._continue_classic_after_pairing(session)
+            else:
+                await self._continue_ble_after_pairing(session)
+            proto_name = session.protocol.value.upper()
+            log.success(f"\n[{proto_name}] Paired and receiving HID reports.")
         else:
-            await self._continue_ble_after_pairing()
+            log.info("Paired device disconnected; the connect loops will pick it up")
 
-        proto_name = self.connected_protocol.value.upper()
-        log.success(f"\n[{proto_name}] Paired and receiving HID reports. Press Ctrl+C to exit.")
-
-        await self._disconnection_event.wait()
+        self._parse_devices()
+        await self._load_keystore_addresses()
+        await self._serve()
 
     # ==================== COMMON ====================
 
-    def _on_disconnection(self, reason):
-        """Handle device disconnection."""
-        proto = self.connected_protocol.value.upper() if self.connected_protocol else "Unknown"
-        addr = self.current_device_address or "unknown"
-        log.warning(f"[{proto}] Device disconnected: {addr} (reason={reason})")
-
-        if reason == 5 and self.current_device_address and proto == "CLASSIC":
-            log.info("[Classic] Authentication failure - will clear stale key and retry")
-            self._auth_failure_address = self.current_device_address
-
-        self._disconnection_event.set()
-
-    def _forward_report(self, data: bytes):
-        """Deduplicate, log, and forward an HID report to UHID."""
-        if data != self._last_report:
+    def _forward_report(self, session: DeviceSession, data: bytes):
+        """Deduplicate the log line and forward an HID report to UHID."""
+        if data != session.last_report:
             log.debug(f"Report: {data.hex()}")
-            self._last_report = data
-        if self.uhid_device:
+            session.last_report = data
+        if session.uhid_device:
             try:
-                self.uhid_device.send_input(data)
+                session.uhid_device.send_input(data)
             except Exception as e:
                 log.warning(f"UHID send failed: {e}")
 
-    def _load_cached_descriptor(self, address: str = None) -> bool:
+    def _load_cached_descriptor(self, session: DeviceSession) -> bool:
         """Load report descriptor and device name from cache. Returns True if found."""
-        address = address or self.current_device_address
-        cache = self.device_cache.load(address)
+        cache = self.device_cache.load(session.address) or \
+            self.device_cache.load(session.raw_address)
         if cache and 'report_map' in cache:
-            self.report_map = bytes.fromhex(cache['report_map'])
-            self.device_name = clean_device_name(cache.get('device_name') or '') or None
-            log.success(f"Loaded cached descriptor ({len(self.report_map)} bytes)")
+            session.report_map = bytes.fromhex(cache['report_map'])
+            session.name = clean_device_name(cache.get('device_name') or '') or None
+            log.success(f"Loaded cached descriptor ({len(session.report_map)} bytes)")
             return True
         return False
 
-    def _create_uhid_device(self):
+    def _create_uhid_device(self, session: DeviceSession):
         """Create UHID virtual device."""
-        if not self.report_map:
+        if not session.report_map:
             log.warning("No report descriptor for UHID")
             return
 
@@ -372,43 +512,39 @@ class HIDHost(ClassicMixin, BLEMixin):
             return
 
         try:
-            name = self._configured_name(self.current_device_address) or self.device_name or "HID Device"
-            descriptor = strip_digitizer_collections(self.report_map)
-            self.uhid_device = UHIDDevice(
+            name = self._configured_name(session.address) or session.name or "HID Device"
+            descriptor = strip_digitizer_collections(session.report_map)
+            session.uhid_device = UHIDDevice(
                 name=name,
                 report_descriptor=descriptor,
                 bus=Bus.BLUETOOTH,
                 vendor=0,
                 product=0,
-                uniq=normalize_addr(self.current_device_address or ""),
+                uniq=session.address,
             )
             log.success(f"UHID device created: {name}")
             asyncio.get_event_loop().call_later(
-                0.5, self.uhid_device.discover_input_paths)
-            self._is_pointer = descriptor_is_pointer(descriptor)
-            log.info(f"Pointer device: {self._is_pointer} (cursor overlay {'on' if self._is_pointer else 'off'})")
-            self._notify_pointer(True)
+                0.5, session.uhid_device.discover_input_paths)
+            session.is_pointer = descriptor_is_pointer(descriptor)
+            if session.is_pointer:
+                log.info("Pointer device: cursor overlay on")
+                if self._pointer_count() == 1:
+                    self._notify_pointer(True)
         except Exception as e:
             log.error(f"Failed to create UHID device: {e}")
 
+    def _pointer_count(self) -> int:
+        return sum(1 for s in self.sessions.values()
+                   if s.is_pointer and s.uhid_device)
+
     def _notify_pointer(self, active: bool):
         """Tell the daemon a pointer device appeared/left, so it can toggle the cursor."""
-        if not self._is_pointer or not self.on_pointer_change:
+        if not self.on_pointer_change:
             return
         try:
             self.on_pointer_change(active)
         except Exception as e:
             log.warning(f"cursor hook failed: {e}")
-
-    def _is_connection_alive(self) -> bool:
-        """Check if the connection is still alive and usable."""
-        if self.connection is None:
-            return False
-        if not hasattr(self.connection, 'handle') or self.connection.handle is None:
-            return False
-        if hasattr(self.connection, 'is_disconnected') and self.connection.is_disconnected:
-            return False
-        return True
 
     async def cleanup(self):
         """Clean up resources."""
@@ -423,33 +559,22 @@ class HIDHost(ClassicMixin, BLEMixin):
                 pass
             self._connection_tasks.clear()
 
-        if self.uhid_device:
-            self._notify_pointer(False)
-            self._is_pointer = False
+        had_pointer = self._pointer_count() > 0
+        for session in list(self.sessions.values()):
+            self.sessions.pop(session.address, None)
             try:
-                self.uhid_device.destroy()
+                await session.cleanup()
             except Exception:
                 pass
-            self.uhid_device = None
+        if had_pointer:
+            self._notify_pointer(False)
 
-        if self._classic_channels:
-            if self._is_connection_alive():
-                await self._classic_channels.disconnect()
-            self._classic_channels = None
-
-        peer_already_disconnected = (
-            self._disconnection_event is not None
-            and self._disconnection_event.is_set()
-        )
-        if self._is_connection_alive() and not peer_already_disconnected:
+        if self._pairing_session:
             try:
-                await asyncio.wait_for(self.connection.disconnect(), timeout=2.0)
-            except asyncio.TimeoutError:
-                log.warning("Connection disconnect timed out")
-            except Exception as e:
-                log.debug(f"Disconnect cleanup: {e}")
-        self.connection = None
-        self.peer = None
+                await self._pairing_session.cleanup()
+            except Exception:
+                pass
+            self._pairing_session = None
 
         if hasattr(self, '_classic_connection_listener') and self._classic_connection_listener:
             try:
@@ -468,15 +593,3 @@ class HIDHost(ClassicMixin, BLEMixin):
             self.transport = None
             from bt_setup import chip
             chip().on_transport_close()
-
-    def get_auth_failure_address(self) -> str:
-        """Get address that had auth failure, if any."""
-        addr = self._auth_failure_address
-        self._auth_failure_address = None
-        return addr
-
-    def get_virtual_cable_unplug_address(self) -> str:
-        """Get address that sent a virtual cable unplug, if any."""
-        addr = self._virtual_cable_unplug_address
-        self._virtual_cable_unplug_address = None
-        return addr
