@@ -6,6 +6,20 @@ HTTP server that exposes daemon operations via a REST-like API.
 Runs embedded in the daemon process; all operations go through DaemonController.
 
 Port 8321 on localhost.
+
+/status shape:
+    {
+      "ok": true, "version": "...",
+      "daemon_running": bool, "scanning": bool, "pairing": bool,
+      "devices": [{"address", "protocol", "name"?}, ...],   # devices.conf
+      "device_count": int,
+      "connections": [                                      # live sessions
+        {"address", "protocol", "name", "hid_ready",
+         "uhid_name"?, "input_paths"?, "descriptor_size"?}, ...]
+    }
+
+/disconnect takes an optional addr param: with it, only that device's
+session is dropped; without it, every session is dropped.
 """
 
 import json
