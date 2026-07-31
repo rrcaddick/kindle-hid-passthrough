@@ -211,7 +211,9 @@ end
 -- Key device attach
 ------------------------------------------------------------------------------
 -- externalkeyboard matches INPUT_KEYBOARD, which FBInk only sets when keycodes
--- 1..31 are all present, so a remote or gamepad is opened by nobody.
+-- 1..31 are all present, so a remote or gamepad is opened by nobody. Keyboards
+-- are skipped by ownership below, not by type: externalkeyboard checks 0.5s
+-- after the uevent and declines outright if the node isn't there yet.
 
 -- Lazy: the fbink_input cdef above is a pcall, so C.INPUT_* at module scope
 -- would take the plugin down when it isn't there.
@@ -219,7 +221,6 @@ local exclude_types
 local function excludeTypes()
     if not exclude_types then
         exclude_types = bit.bor(
-            C.INPUT_KEYBOARD,
             C.INPUT_TOUCHSCREEN,
             C.INPUT_TABLET,
             C.INPUT_SCALED_TABLET,
