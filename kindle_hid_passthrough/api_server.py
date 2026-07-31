@@ -93,7 +93,7 @@ class RequestHandler(BaseHTTPRequestHandler):
             case '/connect':
                 self._handle_connect(param('addr'), param('protocol'))
             case '/disconnect':
-                self._handle_disconnect()
+                self._handle_disconnect(param('addr'))
             case '/logs':
                 self._handle_logs(param('lines'))
             case _:
@@ -230,9 +230,9 @@ class RequestHandler(BaseHTTPRequestHandler):
         controller.request_connect(address, protocol_str or 'ble')
         self._send_json({"ok": True, "message": f"Connecting to {address}"})
 
-    def _handle_disconnect(self):
+    def _handle_disconnect(self, address=None):
         controller = self._controller
-        controller.request_disconnect()
+        controller.request_disconnect(address=address)
         self._send_json({"ok": True, "message": "Disconnecting"})
 
     def _handle_logs(self, lines_str):

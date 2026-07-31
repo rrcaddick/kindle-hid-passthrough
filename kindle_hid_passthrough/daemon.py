@@ -41,7 +41,7 @@ class HIDDaemon:
         """Current connection state for API."""
         if self.host and not self._suspended:
             return self.host.connection_state
-        return {"connected": False}
+        return {"connected": False, "connections": []}
 
     async def suspend(self):
         """Disconnect and release transport for scan/pair."""
@@ -93,14 +93,13 @@ class HIDDaemon:
             await host.cleanup()
             raise
 
-    async def disconnect(self):
-        """Drop the active connection; daemon keeps running and will reconnect."""
-        if self.host and self.host._is_connection_alive():
-            await self.host.connection.disconnect()
+    async def disconnect(self, address=None):
+        """Drop one session by address, or all; daemon keeps running and
+        the connect loops will reconnect."""
+        if self.host and not self._suspended:
+            await self.host.end_session(address)
         else:
             logger.info("No active connection to disconnect")
-        if self._host_task and not self._host_task.done():
-            self._host_task.cancel()
 
     async def resume(self):
         """Resume connections after scan/pair."""
@@ -151,7 +150,6 @@ class HIDDaemon:
                     break
                 continue
 
-            skip_delay = False
             chip().ensure_powered()
 
             try:
@@ -190,26 +188,12 @@ class HIDDaemon:
                 # When suspended, suspend() owns cleanup of self.host. Skipping
                 # here avoids a race where both paths run host.cleanup() in
                 # parallel and deadlock on transport/connection teardown.
-                auth_fail_addr = None
-                vc_unplug_addr = None
                 if self.host and not self._suspended:
-                    auth_fail_addr = self.host.get_auth_failure_address()
-                    vc_unplug_addr = self.host.get_virtual_cable_unplug_address()
                     try:
                         await self.host.cleanup()
                     except Exception:
                         pass
                     self.host = None
-
-                if vc_unplug_addr:
-                    logger.info(f"Virtual cable unplugged by {vc_unplug_addr}, removing device")
-                    config.remove_device(vc_unplug_addr)
-                    skip_delay = True
-
-                if auth_fail_addr:
-                    logger.info(f"Auth failure for {auth_fail_addr}, clearing stale key")
-                    config.remove_pairing_key(auth_fail_addr)
-                    skip_delay = True
 
             if not self.running:
                 break
@@ -218,17 +202,16 @@ class HIDDaemon:
             if self._suspended:
                 continue
 
-            if not skip_delay:
-                logger.info(f"Reconnecting in {config.reconnect_delay}s...")
-                try:
-                    await asyncio.wait_for(
-                        self._resume_event.wait(),
-                        timeout=config.reconnect_delay
-                    )
-                    # Resume event fired during delay — go back to top
-                    self._resume_event.clear()
-                except asyncio.TimeoutError:
-                    pass  # Normal delay elapsed
+            logger.info(f"Reconnecting in {config.reconnect_delay}s...")
+            try:
+                await asyncio.wait_for(
+                    self._resume_event.wait(),
+                    timeout=config.reconnect_delay
+                )
+                # Resume event fired during delay, go back to top
+                self._resume_event.clear()
+            except asyncio.TimeoutError:
+                pass  # Normal delay elapsed
 
         logger.info("Daemon stopped")
 
