@@ -10,8 +10,8 @@ from bumble.hci import (
     HCI_Write_Scan_Enable_Command,
     Role,
 )
-from bumble.hid import HID_CONTROL_PSM, HID_INTERRUPT_PSM, Message
-from bumble.hid import Host as BumbleHIDHost
+from bumble.hid import HID_CONTROL_PSM, HID_INTERRUPT_PSM, Message, SetProtocolMessage
+from bumble.l2cap import ClassicChannelSpec
 from bumble.sdp import Client as SDPClient
 
 from config import Protocol, config, normalize_addr, clean_device_name
@@ -31,8 +31,100 @@ FALLBACK_HID_DESCRIPTOR = bytes([
 ])
 
 
+class ClassicHIDChannels:
+    """HID L2CAP channel pair (control 0x11, interrupt 0x13) for one connection."""
+
+    def __init__(self, connection, on_interrupt_data, on_virtual_cable_unplug):
+        self.connection = connection
+        self.ctrl_channel = None
+        self.intr_channel = None
+        self._on_interrupt_data = on_interrupt_data
+        self._on_virtual_cable_unplug = on_virtual_cable_unplug
+
+    def attach(self, channel):
+        """Adopt an incoming channel opened by the peer."""
+        if channel.psm == HID_CONTROL_PSM:
+            channel.sink = self._on_ctrl_pdu
+            self.ctrl_channel = channel
+        else:
+            channel.sink = self._on_intr_pdu
+            self.intr_channel = channel
+        channel.on(channel.EVENT_CLOSE, lambda: self._on_channel_close(channel))
+
+    async def connect_control_channel(self):
+        channel = await self.connection.create_l2cap_channel(
+            ClassicChannelSpec(HID_CONTROL_PSM))
+        channel.sink = self._on_ctrl_pdu
+        channel.on(channel.EVENT_CLOSE, lambda: self._on_channel_close(channel))
+        self.ctrl_channel = channel
+
+    async def connect_interrupt_channel(self):
+        channel = await self.connection.create_l2cap_channel(
+            ClassicChannelSpec(HID_INTERRUPT_PSM))
+        channel.sink = self._on_intr_pdu
+        channel.on(channel.EVENT_CLOSE, lambda: self._on_channel_close(channel))
+        self.intr_channel = channel
+
+    def _on_channel_close(self, channel):
+        if channel is self.ctrl_channel:
+            self.ctrl_channel = None
+        elif channel is self.intr_channel:
+            self.intr_channel = None
+
+    def set_report_protocol(self):
+        """Send HIDP SET_PROTOCOL(Report) on the control channel."""
+        self.ctrl_channel.write(
+            bytes(SetProtocolMessage(protocol_mode=Message.ProtocolMode.REPORT_PROTOCOL)))
+
+    async def disconnect(self):
+        """Close both channels, interrupt first, 1s cap each."""
+        for attr in ('intr_channel', 'ctrl_channel'):
+            channel = getattr(self, attr)
+            if channel is None:
+                continue
+            setattr(self, attr, None)
+            try:
+                await asyncio.wait_for(channel.disconnect(), timeout=1.0)
+            except Exception:
+                pass
+
+    def _on_ctrl_pdu(self, pdu):
+        if len(pdu) < 1:
+            return
+        message_type = pdu[0] >> 4
+        param = pdu[0] & 0x0F
+        if message_type == Message.MessageType.HANDSHAKE:
+            log.debug(f"[Classic] HID handshake: 0x{param:X}")
+        elif message_type == Message.MessageType.CONTROL and \
+                param == Message.ControlCommand.VIRTUAL_CABLE_UNPLUG:
+            self._on_virtual_cable_unplug()
+
+    def _on_intr_pdu(self, pdu):
+        self._on_interrupt_data(pdu)
+
+
 class ClassicMixin:
     """Classic Bluetooth methods for HIDHost."""
+
+    def _ensure_classic_psm_servers(self):
+        """Register the HID L2CAP servers once per bumble device."""
+        if self._classic_psm_registered:
+            return
+        for psm in (HID_CONTROL_PSM, HID_INTERRUPT_PSM):
+            self.device.create_l2cap_server(
+                ClassicChannelSpec(psm), self._on_classic_l2cap_channel)
+        self._classic_psm_registered = True
+
+    def _on_classic_l2cap_channel(self, channel):
+        """Route an incoming HID L2CAP channel to its connection's holder."""
+        def on_open():
+            holder = self._classic_channels
+            if holder is None or holder.connection is not channel.connection:
+                log.warning(f"[Classic] Unexpected HID channel from "
+                            f"{channel.connection.peer_address}")
+                return
+            holder.attach(channel)
+        channel.on(channel.EVENT_OPEN, on_open)
 
     async def _run_classic_handler(self):
         """Handle Classic Bluetooth connections."""
@@ -43,9 +135,7 @@ class ClassicMixin:
                 pass
             self._classic_connection_listener = None
 
-        self.hid_host = BumbleHIDHost(self.device)
-        self.hid_host.on(BumbleHIDHost.EVENT_INTERRUPT_DATA, self._on_classic_interrupt_data)
-        self.hid_host.on(BumbleHIDHost.EVENT_VIRTUAL_CABLE_UNPLUG, self._on_virtual_cable_unplug)
+        self._ensure_classic_psm_servers()
         log.info(f"[Classic] HID Host ready (PSM 0x{HID_CONTROL_PSM:04X}, 0x{HID_INTERRUPT_PSM:04X})")
 
         log.info("[Classic] Enabling Page Scan...")
@@ -57,14 +147,6 @@ class ClassicMixin:
         async def on_classic_connection(connection):
             if self._connection_future.done():
                 log.info("[Classic] Connection received but another protocol won")
-                try:
-                    await connection.disconnect()
-                except Exception:
-                    pass
-                return
-
-            if not self.hid_host:
-                log.warning("[Classic] Connection received but hid_host not ready, ignoring")
                 try:
                     await connection.disconnect()
                 except Exception:
@@ -101,8 +183,6 @@ class ClassicMixin:
             connection.on('disconnection', on_conn_lost)
             connection.on('disconnection', self._on_disconnection)
 
-            self.hid_host.on_device_connection(connection)
-
             if connection.role != Role.CENTRAL:
                 log.info("[Classic] Requesting role switch to central...")
                 try:
@@ -128,10 +208,12 @@ class ClassicMixin:
                 log.warning("[Classic] Connection lost during authentication")
                 return
 
-            if not self.hid_host.l2cap_ctrl_channel:
+            channels = self._classic_channels
+
+            if not channels.ctrl_channel:
                 log.info("[Classic] Connecting to HID control channel...")
                 try:
-                    await asyncio.wait_for(self.hid_host.connect_control_channel(), timeout=5.0)
+                    await asyncio.wait_for(channels.connect_control_channel(), timeout=5.0)
                     log.success("[Classic] HID control channel connected")
                 except Exception as e:
                     log.warning(f"[Classic] Control channel: {e!r}")
@@ -140,10 +222,10 @@ class ClassicMixin:
                 log.warning("[Classic] Connection lost during channel setup")
                 return
 
-            if not self.hid_host.l2cap_intr_channel:
+            if not channels.intr_channel:
                 log.info("[Classic] Connecting to HID interrupt channel...")
                 try:
-                    await asyncio.wait_for(self.hid_host.connect_interrupt_channel(), timeout=5.0)
+                    await asyncio.wait_for(channels.connect_interrupt_channel(), timeout=5.0)
                     log.success("[Classic] HID interrupt channel connected")
                 except Exception as e:
                     log.warning(f"[Classic] Interrupt channel: {e!r}")
@@ -152,7 +234,7 @@ class ClassicMixin:
                 log.warning("[Classic] Connection lost during channel setup")
                 return
 
-            if not self.hid_host.l2cap_intr_channel:
+            if not channels.intr_channel:
                 log.warning("[Classic] HID interrupt channel failed to connect, dropping link")
                 try:
                     await connection.disconnect()
@@ -178,6 +260,8 @@ class ClassicMixin:
                           or not hasattr(connection, 'transport')
             if not is_classic:
                 return
+            self._classic_channels = ClassicHIDChannels(
+                connection, self._on_classic_interrupt_data, self._on_virtual_cable_unplug)
             prev_task = getattr(self, '_classic_conn_task', None)
             if prev_task is not None and not prev_task.done():
                 prev_task.cancel()
@@ -276,10 +360,11 @@ class ClassicMixin:
 
     def _classic_set_report_protocol(self):
         """Send HIDP SET_PROTOCOL(Report) on the control channel."""
-        if not self.hid_host or not self.hid_host.l2cap_ctrl_channel:
+        channels = self._classic_channels
+        if not channels or not channels.ctrl_channel:
             return
         try:
-            self.hid_host.set_protocol(Message.ProtocolMode.REPORT_PROTOCOL)
+            channels.set_report_protocol()
             log.info("[Classic] Sent SET_PROTOCOL (Report)")
         except Exception as e:
             log.warning(f"[Classic] SET_PROTOCOL failed: {e}")
@@ -293,7 +378,7 @@ class ClassicMixin:
 
     async def _handle_classic_connection(self):
         """Finalize Classic connection setup."""
-        if not self.hid_host.l2cap_intr_channel:
+        if not self._classic_channels or not self._classic_channels.intr_channel:
             raise InvalidStateError("HID interrupt channel not connected")
 
         if not self._load_cached_descriptor():
@@ -473,28 +558,27 @@ class ClassicMixin:
 
     async def _continue_classic_after_pairing(self):
         """Continue Classic connection after pairing."""
-        self.hid_host = BumbleHIDHost(self.device)
-        self.hid_host.on(BumbleHIDHost.EVENT_INTERRUPT_DATA, self._on_classic_interrupt_data)
-        self.hid_host.on(BumbleHIDHost.EVENT_VIRTUAL_CABLE_UNPLUG, self._on_virtual_cable_unplug)
+        self._ensure_classic_psm_servers()
+        self._classic_channels = ClassicHIDChannels(
+            self.connection, self._on_classic_interrupt_data, self._on_virtual_cable_unplug)
+        channels = self._classic_channels
         log.info("[Classic] HID Host created")
-
-        self.hid_host.on_device_connection(self.connection)
 
         log.info("[Classic] Connecting to HID control channel...")
         try:
-            await asyncio.wait_for(self.hid_host.connect_control_channel(), timeout=5.0)
+            await asyncio.wait_for(channels.connect_control_channel(), timeout=5.0)
             log.success("[Classic] HID control channel connected")
         except Exception as e:
             log.warning(f"[Classic] Control channel: {e!r}")
 
         log.info("[Classic] Connecting to HID interrupt channel...")
         try:
-            await asyncio.wait_for(self.hid_host.connect_interrupt_channel(), timeout=5.0)
+            await asyncio.wait_for(channels.connect_interrupt_channel(), timeout=5.0)
             log.success("[Classic] HID interrupt channel connected")
         except Exception as e:
             log.warning(f"[Classic] Interrupt channel: {e!r}")
 
-        if not self.hid_host.l2cap_intr_channel:
+        if not channels.intr_channel:
             log.error("[Classic] Failed to connect HID interrupt channel")
             return
 

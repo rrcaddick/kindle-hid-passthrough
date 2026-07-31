@@ -49,7 +49,8 @@ class HIDHost(ClassicMixin, BLEMixin):
         self.connection = None
         self.peer = None
 
-        self.hid_host = None
+        self._classic_channels = None
+        self._classic_psm_registered = False
         self.connected_protocol = None
 
         self._connection_tasks: set = set()
@@ -431,21 +432,10 @@ class HIDHost(ClassicMixin, BLEMixin):
                 pass
             self.uhid_device = None
 
-        if self.hid_host:
+        if self._classic_channels:
             if self._is_connection_alive():
-                if self.hid_host.l2cap_intr_channel:
-                    try:
-                        await asyncio.wait_for(
-                            self.hid_host.disconnect_interrupt_channel(), timeout=1.0)
-                    except (asyncio.TimeoutError, Exception):
-                        pass
-                if self.hid_host.l2cap_ctrl_channel:
-                    try:
-                        await asyncio.wait_for(
-                            self.hid_host.disconnect_control_channel(), timeout=1.0)
-                    except (asyncio.TimeoutError, Exception):
-                        pass
-            self.hid_host = None
+                await self._classic_channels.disconnect()
+            self._classic_channels = None
 
         peer_already_disconnected = (
             self._disconnection_event is not None
