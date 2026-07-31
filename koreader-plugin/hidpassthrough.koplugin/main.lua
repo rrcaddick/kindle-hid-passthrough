@@ -986,9 +986,16 @@ function HIDPassthrough:showInfo()
             table.insert(lines, T(_("Configured devices: %1"), tostring(n_devices)))
         end
 
-        local connected = extractField(body, "connected_device")
-        if connected and connected ~= "" and connected ~= "null" then
-            table.insert(lines, T(_("Connected: %1"), connected))
+        local connected = {}
+        local okj, data = pcall(rapidjson.decode, body)
+        if okj and type(data) == "table" and type(data.connections) == "table" then
+            for _, conn in ipairs(data.connections) do
+                table.insert(connected, conn.name or conn.address or "?")
+            end
+        end
+        if #connected > 0 then
+            table.insert(lines, T(_("Connected (%1): %2"),
+                tostring(#connected), table.concat(connected, ", ")))
         end
 
         if body:find('"scanning"%s*:%s*true') then
@@ -1238,12 +1245,17 @@ function HIDPassthrough:showPairedDevices()
         return
     end
 
-    local connected_addr = data.connected_device
+    local connected = {}
+    if type(data.connections) == "table" then
+        for _, conn in ipairs(data.connections) do
+            if conn.address then
+                connected[conn.address:upper()] = true
+            end
+        end
+    end
     local items = {}
     for _, dev in ipairs(devices) do
-        local is_conn = connected_addr
-            and dev.address
-            and dev.address:upper() == tostring(connected_addr):upper()
+        local is_conn = (dev.address and connected[dev.address:upper()]) or false
         local prefix = is_conn and "● " or "○ "
         local addr  = dev.address
         local proto = dev.protocol or "ble"
