@@ -266,9 +266,10 @@ class UHIDDevice:
     def discover_input_paths(self):
         """Find /dev/input/eventX paths for this UHID device.
 
-        Parses /proc/bus/input/devices for entries matching this device's name.
-        Called externally after an async delay to give the kernel time to
-        register the input device after UHID_CREATE2.
+        Parses /proc/bus/input/devices, matching by uniq (the BD address)
+        when set, else by device name. Called externally after an async
+        delay to give the kernel time to register the input device after
+        UHID_CREATE2.
         """
         self.input_paths = []
         try:
@@ -277,13 +278,22 @@ class UHIDDevice:
             return
 
         for block in content.split("\n\n"):
-            if self.name not in block:
+            if not self._block_matches(block):
                 continue
             for line in block.splitlines():
                 if line.startswith("H: Handlers="):
                     for tok in line.split("=", 1)[1].split():
                         if tok.startswith("event"):
                             self.input_paths.append("/dev/input/" + tok)
+
+    def _block_matches(self, block: str) -> bool:
+        """Match a /proc/bus/input/devices block to this device."""
+        if not self.uniq:
+            return self.name in block
+        for line in block.splitlines():
+            if line.startswith("U: Uniq="):
+                return line.split("=", 1)[1].strip().lower() == self.uniq.lower()
+        return False
 
     def send_input(self, data: bytes):
         """Send HID input report to the kernel.
