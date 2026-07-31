@@ -27,10 +27,15 @@ state = {
         {"address": "98:B9:EA:01:67:68", "protocol": "classic", "name": "Xbox Wireless Controller"},
         {"address": "5C:2B:3E:50:4F:04", "protocol": "ble", "name": "BLE-M3"},
     ],
-    "connected_device": None,
-    "connected_protocol": None,
-    "connected_name": None,
-    "hid_ready": True,
+    "connections": [
+        {"address": "98:B9:EA:01:67:68", "protocol": "classic",
+         "name": "Xbox Wireless Controller", "hid_ready": True,
+         "uhid_name": "Xbox Wireless Controller",
+         "input_paths": ["/dev/input/event4"], "descriptor_size": 307},
+        {"address": "5C:2B:3E:50:4F:04", "protocol": "ble",
+         "name": "BLE-M3", "hid_ready": True, "uhid_name": "BLE-M3",
+         "input_paths": ["/dev/input/event5"], "descriptor_size": 118},
+    ],
     "autostart": False,
     "version": "3.0.0",
     "scan_results": [
@@ -64,12 +69,8 @@ class MockHandler(SimpleHTTPRequestHandler):
                 "scanning": state["scanning"],
                 "pairing": state["pairing"],
                 "autostart": state["autostart"],
+                "connections": state["connections"] if state["daemon_running"] else [],
             }
-            if state["connected_device"]:
-                resp["connected_device"] = state["connected_device"]
-                resp["connected_protocol"] = state["connected_protocol"]
-                resp["connected_name"] = state["connected_name"]
-                resp["hid_ready"] = state["hid_ready"]
             self._json(resp)
 
         elif self.path == "/scan":
@@ -100,24 +101,42 @@ class MockHandler(SimpleHTTPRequestHandler):
 
         elif self.path == "/stop":
             state["daemon_running"] = False
-            state["connected_device"] = None
+            state["connections"] = []
             self._json({"ok": True})
 
         elif self.path.startswith("/connect?"):
             addr = _parse_param(self.path, "addr")
-            proto = _parse_param(self.path, "proto") or "classic"
-            state["connected_device"] = addr
-            state["connected_protocol"] = proto
-            state["connected_name"] = None
+            proto = _parse_param(self.path, "protocol") or \
+                _parse_param(self.path, "proto") or "classic"
+            name = None
             for d in state["devices"]:
                 if d["address"].upper() == addr.upper():
-                    state["connected_name"] = d.get("name")
+                    name = d.get("name")
+                    proto = d.get("protocol", proto)
+            state["connections"] = [
+                c for c in state["connections"]
+                if c["address"].upper() != addr.upper()
+            ]
+            state["connections"].append({
+                "address": addr,
+                "protocol": proto,
+                "name": name,
+                "hid_ready": True,
+                "uhid_name": name or addr,
+                "input_paths": ["/dev/input/event9"],
+                "descriptor_size": 64,
+            })
             self._json({"ok": True})
 
         elif self.path.startswith("/disconnect"):
-            state["connected_device"] = None
-            state["connected_protocol"] = None
-            state["connected_name"] = None
+            addr = _parse_param(self.path, "addr")
+            if addr:
+                state["connections"] = [
+                    c for c in state["connections"]
+                    if c["address"].upper() != addr.upper()
+                ]
+            else:
+                state["connections"] = []
             self._json({"ok": True})
 
         elif self.path.startswith("/remove?"):
@@ -126,6 +145,10 @@ class MockHandler(SimpleHTTPRequestHandler):
                 state["devices"] = [
                     d for d in state["devices"]
                     if d["address"].upper() != addr.upper()
+                ]
+                state["connections"] = [
+                    c for c in state["connections"]
+                    if c["address"].upper() != addr.upper()
                 ]
             self._json({"ok": True})
 

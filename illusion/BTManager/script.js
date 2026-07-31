@@ -148,6 +148,21 @@ var BTManager = (function() {
         return text;
     }
 
+    function getConnections(status) {
+        return (status && status.connections) ? status.connections : [];
+    }
+
+    function findConnection(status, addr) {
+        if (!addr) return null;
+        var conns = getConnections(status);
+        for (var i = 0; i < conns.length; i++) {
+            if (conns[i].address &&
+                    conns[i].address.toUpperCase() === addr.toUpperCase()) {
+                return conns[i];
+            }
+        }
+        return null;
+    }
     // ---- Toggle ----
 
     function setToggleUI(on) {
@@ -240,10 +255,14 @@ var BTManager = (function() {
             var running = data.daemon_running || data.scanning || data.pairing;
             setToggleUI(running);
 
-            renderDeviceLists(data.devices, data.connected_device || null);
+            var conns = getConnections(data);
+            renderDeviceLists(data.devices, conns);
 
-            getEl("hidWarning").style.display =
-                (data.connected_device && data.hid_ready === false) ? "block" : "none";
+            var hidMissing = false;
+            for (var i = 0; i < conns.length; i++) {
+                if (conns[i].hid_ready === false) hidMissing = true;
+            }
+            getEl("hidWarning").style.display = hidMissing ? "block" : "none";
 
             if (data.version) {
                 getEl("footerVersion").innerHTML = "v" + escapeHtml(data.version);
@@ -259,20 +278,42 @@ var BTManager = (function() {
 
     // ---- Device Lists (3-tier) ----
 
-    function renderDeviceLists(devices, connectedAddr) {
+    function renderDeviceLists(devices, connections) {
+        var connectedAddrs = {};
+        var i;
+        for (i = 0; i < connections.length; i++) {
+            if (connections[i].address) {
+                connectedAddrs[connections[i].address.toUpperCase()] = true;
+            }
+        }
+
         var connected = [];
         var paired = [];
+        var listed = {};
 
         if (devices) {
-            for (var i = 0; i < devices.length; i++) {
+            for (i = 0; i < devices.length; i++) {
                 var dev = devices[i];
-                var isConn = connectedAddr && dev.address &&
-                    dev.address.toUpperCase() === connectedAddr.toUpperCase();
-                if (isConn) {
+                var key = dev.address ? dev.address.toUpperCase() : "";
+                listed[key] = true;
+                if (key && connectedAddrs[key]) {
                     connected.push(dev);
                 } else {
                     paired.push(dev);
                 }
+            }
+        }
+
+        // Connections with no devices.conf entry (wildcard or keystore-only)
+        for (i = 0; i < connections.length; i++) {
+            var conn = connections[i];
+            var ckey = conn.address ? conn.address.toUpperCase() : "";
+            if (ckey && !listed[ckey]) {
+                connected.push({
+                    address: conn.address,
+                    protocol: conn.protocol,
+                    name: conn.name
+                });
             }
         }
 
@@ -324,22 +365,16 @@ var BTManager = (function() {
         getEl("deviceOverlay").className = "device-overlay visible";
     }
 
-    function isDetailConnected() {
-        if (!detailDevice || !detailDevice.addr) return false;
-        if (!lastStatus || !lastStatus.connected_device) return false;
-        return lastStatus.connected_device.toUpperCase() === detailDevice.addr.toUpperCase();
-    }
-
     function renderDeviceDetail() {
         if (!detailDevice) return;
 
-        var isConnected = isDetailConnected();
+        var conn = findConnection(lastStatus, detailDevice.addr);
+        var isConnected = conn !== null;
         detailDevice.connected = isConnected;
 
-        var uhid = isConnected && lastStatus ? (lastStatus.uhid_name || "") : "";
-        var inputs = isConnected && lastStatus && lastStatus.input_paths
-            ? lastStatus.input_paths.join(", ") : "";
-        var hidReady = isConnected && lastStatus ? lastStatus.hid_ready : null;
+        var uhid = conn ? (conn.uhid_name || "") : "";
+        var inputs = conn && conn.input_paths ? conn.input_paths.join(", ") : "";
+        var hidReady = conn ? conn.hid_ready : null;
 
         var key = [isConnected ? "1" : "0", String(hidReady), uhid, inputs,
                    detailDevice.name, detailDevice.proto].join("|");
