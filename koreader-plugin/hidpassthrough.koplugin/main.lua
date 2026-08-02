@@ -232,9 +232,20 @@ local function excludeTypes()
     return exclude_types
 end
 
+-- INPUT_JOYSTICK too: FBInk's test_key only looks below BTN_MISC and in
+-- KEY_OK..BTN_TRIGGER_HAPPY, so a pad with nothing but BTN_A..BTN_THUMBR
+-- (304-319) is never INPUT_KEY.
+local match_types
+local function matchTypes()
+    if not match_types then
+        match_types = bit.bor(C.INPUT_KEY, C.INPUT_JOYSTICK)
+    end
+    return match_types
+end
+
 local function checkKeyDevice(path)
     local FBInkInput = ffi.loadlib("fbink_input", 1)
-    local dev = FBInkInput.fbink_input_check(path, C.INPUT_KEY, excludeTypes(), 0)
+    local dev = FBInkInput.fbink_input_check(path, matchTypes(), excludeTypes(), 0)
     local info
     if dev ~= nil then
         if dev.matched then
