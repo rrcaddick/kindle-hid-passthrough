@@ -4,9 +4,11 @@ Userspace Bluetooth HID host for Kindle with UHID passthrough.
 
 ## Scope of the KOReader plugin
 
-`hidpassthrough.koplugin` handles the easy input cases only: opening the evdev node nothing else adopts, and letting plain EV_KEY presses reach KOReader bindings.
+`hidpassthrough.koplugin` handles the easy input cases only, meaning it opens the evdev node nothing else adopts and lets plain EV_KEY presses reach KOReader bindings.
 
-The hard cases belong in kindle-button-mapper, not here: EV_ABS translation (D-pad hat axes, analog sticks), joystick mapping, keyboard layouts.
+The hard cases belong in kindle-button-mapper, not here. That covers EV_ABS translation (D-pad hat axes, analog sticks), joystick mapping and keyboard layouts.
+
+This project does Bluetooth and produces a proper evdev node, the mapper gives the buttons meaning, and both stay usable alone. See `docs/refactor-input-ownership.md` for the split we're moving to and what still has to happen.
 
 ## SSH Configuration
 
