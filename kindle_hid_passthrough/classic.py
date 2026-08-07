@@ -303,7 +303,12 @@ class ClassicMixin:
                         pass
                     self._radio_lock.release()
 
-            await asyncio.sleep(self.ACTIVE_RETRY_INTERVAL)
+            # Page scan catches powered-on devices instantly; active paging is
+            # the fallback, so with live links yield the radio to them and wifi.
+            if self.sessions:
+                await asyncio.sleep(self.ACTIVE_RETRY_INTERVAL_CONNECTED)
+            else:
+                await asyncio.sleep(self.ACTIVE_RETRY_INTERVAL)
 
     def _classic_set_report_protocol(self, session):
         """Send HIDP SET_PROTOCOL(Report) on the control channel."""
