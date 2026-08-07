@@ -268,7 +268,7 @@ class DaemonController:
             if self._cursor_proc is not None and self._cursor_proc.poll() is None:
                 return
             # reap any stray overlay (e.g. orphaned by a prior daemon restart)
-            subprocess.run(['pkill', '-x', 'mousecursor'], capture_output=True)
+            subprocess.run(['killall', '-q', 'mousecursor'], capture_output=True)
             binary = os.path.join(config.base_path, 'scripts', 'mousecursor')
             errlog = os.path.join(config.base_path, 'cache', 'mousecursor.log')
             try:
@@ -293,7 +293,7 @@ class DaemonController:
                     proc.kill()
                     proc.wait()
             # safety net: reap any stray/orphaned overlay too
-            subprocess.run(['pkill', '-x', 'mousecursor'], capture_output=True)
+            subprocess.run(['killall', '-q', 'mousecursor'], capture_output=True)
 
     # ---- Disconnect / Stop ----
 

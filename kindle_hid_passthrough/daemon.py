@@ -242,7 +242,7 @@ async def main():
     controller.loop = asyncio.get_event_loop()
 
     # Reap any cursor overlay orphaned by a previous daemon before we start.
-    subprocess.run(['pkill', '-x', 'mousecursor'], capture_output=True)
+    subprocess.run(['killall', '-q', 'mousecursor'], capture_output=True)
 
     # Auto-toggle the mouse cursor overlay as pointer devices connect/disconnect.
     def _cursor_for_pointer(active):
