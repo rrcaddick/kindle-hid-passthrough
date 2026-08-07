@@ -75,11 +75,12 @@ def strip_digitizer_collections(descriptor: bytes) -> bytes:
     return result
 
 def descriptor_is_pointer(descriptor: bytes) -> bool:
-    """True if the descriptor declares a Generic Desktop Mouse/Pointer app collection.
+    """True if the descriptor's first top-level Application collection is a
+    Generic Desktop Mouse (0x02) or Pointer (0x01).
 
-    Walks HID items tracking the current Usage Page and last Usage; when a
-    top-level Application collection opens, checks whether it was introduced by
-    Generic Desktop (0x01) Mouse (0x02) or Pointer (0x01).
+    Only the first collection decides: devices lead with their primary
+    function, and combo keyboards that append a pointer collection must not
+    drive the cursor overlay.
     """
     i = 0
     usage_page = None
@@ -111,9 +112,8 @@ def descriptor_is_pointer(descriptor: bytes) -> bool:
         elif item_type == 2 and tag == 0:      # Local: Usage
             last_usage = val
         elif item_type == 0 and tag == 10:     # Main: Collection
-            if depth == 0 and val == 0x01 and usage_page == 0x01 \
-                    and last_usage in (0x01, 0x02):
-                return True
+            if depth == 0 and val == 0x01:
+                return usage_page == 0x01 and last_usage in (0x01, 0x02)
             depth += 1
         elif item_type == 0 and tag == 12:     # Main: End Collection
             depth -= 1
