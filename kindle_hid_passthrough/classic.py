@@ -407,7 +407,7 @@ class ClassicMixin:
             await self._query_classic_sdp(address)
 
             if self.keystore:
-                keys = await self.keystore.get(address)
+                keys = await self.keystore.get(str(self.connection.peer_address))
                 if keys and keys.link_key:
                     log.success("[Classic] Link key verified")
                 else:
