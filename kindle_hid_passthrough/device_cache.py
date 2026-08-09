@@ -6,6 +6,8 @@ import logging
 import os
 from typing import Dict, Optional
 
+from config import normalize_addr
+
 logger = logging.getLogger(__name__)
 
 
@@ -30,7 +32,7 @@ class DeviceCache:
         Returns:
             Path to cache file
         """
-        safe_addr = address.replace(':', '_').replace('/', '_')
+        safe_addr = normalize_addr(address).replace(':', '_')
         return os.path.join(self.cache_dir, f"{safe_addr}.json")
 
     def load(self, address: str) -> Optional[Dict]:
