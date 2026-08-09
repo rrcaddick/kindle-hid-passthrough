@@ -322,19 +322,26 @@ class HIDHost(ClassicMixin, BLEMixin):
                         pass
 
     async def _session_watchdog(self):
-        """Ask the daemon for a transport rebuild when idle too long."""
+        """Ask the daemon for a transport rebuild if nothing ever connects.
+
+        Once a device has connected, an empty session set is a device that
+        went to sleep, not a broken transport: the handlers keep initiating
+        on the open radio, so rebuilding would only make us deaf for a while.
+        """
+        had_session = False
         while True:
             self._sessions_changed.clear()
-            if not self.sessions:
-                try:
-                    await asyncio.wait_for(
-                        self._sessions_changed.wait(),
-                        timeout=self.FIRST_SESSION_TIMEOUT)
-                except asyncio.TimeoutError:
-                    log.warning("Connection timeout - no device connected")
-                    raise InvalidStateError("No device connected within timeout")
-            else:
+            if self.sessions or had_session:
+                had_session = True
                 await self._sessions_changed.wait()
+                continue
+            try:
+                await asyncio.wait_for(
+                    self._sessions_changed.wait(),
+                    timeout=self.FIRST_SESSION_TIMEOUT)
+            except asyncio.TimeoutError:
+                log.warning("Connection timeout - no device connected")
+                raise InvalidStateError("No device connected within timeout")
 
     def _notify_sessions_changed(self):
         if self._sessions_changed:
