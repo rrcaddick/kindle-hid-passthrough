@@ -134,9 +134,10 @@ def run_diagnostics():
     if dev:
         _kv("exists", os.path.exists(dev))
         _kv("ls -l", _sh(['ls', '-l', dev]))
-        if kindle and kindle.transport_scheme == 'serial' and os.path.exists(dev):
-            _kv("live termios", _termios_flags(dev))
+        if os.path.exists(dev):
             _kv("holders (fuser)", _sh(['fuser', dev]) or "<none>")
+            if kindle and kindle.transport_scheme == 'serial':
+                _kv("live termios", _termios_flags(dev))
 
     _hdr("BT proc interface")
     for p in ('/proc/bluetooth/btenable',
@@ -159,7 +160,7 @@ def run_diagnostics():
     _kv("btfd BTstate", _sh(['lipc-get-prop', 'com.lab126.btfd', 'BTstate']))
 
     _hdr("Kernel BT log (dmesg tail)")
-    _out(_sh(['sh', '-c', 'dmesg | grep -iE "bluetooth|hci|btmxc|ttymxc2|bcm" | tail -25 || true'])
+    _out(_sh(['sh', '-c', 'dmesg | grep -iE "bluetooth|hci|btmxc|ttymxc2|bcm|wmt|stpbt|conninfra|mtk" | tail -25 || true'])
          or "<none>")
 
     _hdr("Daemon log tail")

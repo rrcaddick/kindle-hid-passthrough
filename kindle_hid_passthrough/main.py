@@ -48,20 +48,30 @@ async def pair_mode(protocol_filter: Protocol = None, sequential: bool = False):
         prepare_bt()
         await scanner.start()
 
+        # Only a tty can send that Enter. A pipe or redirect (ssh without -t,
+        # nohup, upstart) is readable at EOF, so the reader fires immediately
+        # and every scan returns in ~0s with 0 devices (issue #179).
+        try:
+            interactive = sys.stdin.isatty()
+        except (AttributeError, ValueError):
+            interactive = False
+
         selected = None
         while selected is None:
             log.info("Put your device in pairing mode...")
-            print("Press Enter to stop scanning early.")
+            if interactive:
+                print("Press Enter to stop scanning early.")
             devices = []
             while not devices:
                 stop_event = asyncio.Event()
                 loop = asyncio.get_event_loop()
                 stdin_watched = False
-                try:
-                    loop.add_reader(sys.stdin.fileno(), stop_event.set)
-                    stdin_watched = True
-                except (OSError, ValueError):
-                    pass  # stdin not pollable (headless/service): just scan
+                if interactive:
+                    try:
+                        loop.add_reader(sys.stdin.fileno(), stop_event.set)
+                        stdin_watched = True
+                    except (OSError, ValueError):
+                        pass  # stdin not pollable (headless/service): just scan
                 try:
                     all_devices = await scanner.scan(
                         duration=10.0, concurrent=not sequential,
