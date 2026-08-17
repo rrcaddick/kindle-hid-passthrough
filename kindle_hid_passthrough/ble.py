@@ -15,6 +15,10 @@ from bumble.gatt import (
     GATT_REPORT_MAP_CHARACTERISTIC,
     GATT_REPORT_REFERENCE_DESCRIPTOR,
 )
+from bumble.l2cap import (
+    L2CAP_CONNECTION_PARAMETERS_ACCEPTED_RESULT,
+    L2CAP_Connection_Parameter_Update_Response,
+)
 from bumble.hci import (
     Address,
     HCI_LE_Add_Device_To_Filter_Accept_List_Command,
@@ -43,6 +47,23 @@ CONN_SUPERVISION_TIMEOUT = 72   # 720ms
 # that asks for a longer one usually has a reason, so keep the larger of the
 # two rather than forcing ours and provoking dropouts.
 CONN_SUPERVISION_MAX = 3200  # 32s, the spec ceiling
+
+
+def _link_is_fast_enough(connection):
+    """True when the live link already has no latency and a short interval.
+
+    Connection.parameters carries the values in milliseconds, as reported by
+    the controller after the last update, so this reflects the link as it
+    actually is rather than what anyone asked for.
+    """
+    params = getattr(connection, 'parameters', None)
+    if params is None:
+        return False
+    try:
+        return (params.peripheral_latency == CONN_MAX_LATENCY
+                and params.connection_interval <= CONN_INTERVAL_MAX * 1.25 + 0.01)
+    except AttributeError:
+        return False
 
 
 class BLEMixin:
@@ -77,6 +98,23 @@ class BLEMixin:
         def clamped(connection, cid, request):
             asked = (request.interval_min, request.interval_max,
                      request.latency, request.timeout)
+
+            # A remote that wanted latency will not stop asking just because
+            # it was told yes — it can see the link did not change, and a
+            # CLOUT ring re-asks about twice a second, indefinitely. Answer
+            # every time, but only touch the link when it actually needs it:
+            # each grant is a real LL connection update, and renegotiating
+            # twice a second costs exactly the responsiveness we came for.
+            if _link_is_fast_enough(connection):
+                manager.send_control_frame(
+                    connection, cid,
+                    L2CAP_Connection_Parameter_Update_Response(
+                        identifier=request.identifier,
+                        result=L2CAP_CONNECTION_PARAMETERS_ACCEPTED_RESULT))
+                log.debug(f"[BLE] Ignoring repeat parameter request {asked}; "
+                          f"link is already fast")
+                return
+
             request.interval_min = CONN_INTERVAL_MIN
             request.interval_max = CONN_INTERVAL_MAX
             request.latency = CONN_MAX_LATENCY
