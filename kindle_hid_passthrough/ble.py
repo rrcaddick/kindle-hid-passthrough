@@ -29,12 +29,79 @@ from logging_utils import log
 
 HID_REPORT_TYPE_INPUT = 1
 
+# Link timing we ask for, in the units the HCI commands take: 1.25ms for the
+# intervals, 10ms for the supervision timeout.
+#
+# These are also what _ble_initiate() puts in HCI_LE_Create_Connection_Command,
+# and they are deliberately tight: a remote's first button press has to wait
+# for the next radio anchor point, so a slow interval is felt directly as lag.
+CONN_INTERVAL_MIN = 12       # 15ms
+CONN_INTERVAL_MAX = 24       # 30ms
+CONN_MAX_LATENCY = 0         # never let the peripheral skip anchor points
+CONN_SUPERVISION_TIMEOUT = 72   # 720ms
+# The spec requires timeout > (1 + latency) * interval_max * 2, and a peripheral
+# that asks for a longer one usually has a reason, so keep the larger of the
+# two rather than forcing ours and provoking dropouts.
+CONN_SUPERVISION_MAX = 3200  # 32s, the spec ceiling
+
 
 class BLEMixin:
     """BLE methods for HIDHost."""
 
     BLE_INIT_WINDOW = 18.0
     BLE_SCAN_WINDOW = 8.0
+
+    def _pin_connection_parameters(self):
+        """Keep the link fast even when the peripheral asks to slow it down.
+
+        We open the connection at a 15-30ms interval with no peripheral
+        latency, but a remote is free to ask for something more power-saving
+        the moment it is connected, and Bumble's central-role handler grants
+        whatever is asked without looking at it. A remote that negotiates its
+        way to a slow interval then makes every press wait for the next radio
+        anchor point, which is felt as the first button press after a pause
+        taking a second or more while a burst of presses stays instant.
+
+        So keep answering "accepted" — refusing tends to make remotes retry or
+        drop the link — but hand the controller our timing rather than theirs.
+        The peripheral's supervision timeout is honoured when it is longer than
+        ours, since that only makes the link more forgiving, and shortening it
+        under a peripheral that expects slack risks needless disconnections.
+        """
+        manager = getattr(self.device, 'l2cap_channel_manager', None)
+        handler = getattr(manager, 'on_l2cap_connection_parameter_update_request', None)
+        if handler is None:
+            log.warning("Cannot pin BLE connection parameters on this Bumble build")
+            return
+
+        def clamped(connection, cid, request):
+            asked = (request.interval_min, request.interval_max,
+                     request.latency, request.timeout)
+            request.interval_min = CONN_INTERVAL_MIN
+            request.interval_max = CONN_INTERVAL_MAX
+            request.latency = CONN_MAX_LATENCY
+            request.timeout = min(max(request.timeout, CONN_SUPERVISION_TIMEOUT),
+                                  CONN_SUPERVISION_MAX)
+            log.info(
+                f"[BLE] Peripheral asked for interval {asked[0]}-{asked[1]}, "
+                f"latency {asked[2]}, timeout {asked[3]}; granting "
+                f"{request.interval_min}-{request.interval_max}, "
+                f"latency {request.latency}, timeout {request.timeout}")
+            return handler(connection, cid, request)
+
+        manager.on_l2cap_connection_parameter_update_request = clamped
+
+    def _watch_connection_parameters(self, connection):
+        """Log the timing actually in force, so the link can be verified."""
+        def on_update():
+            p = connection.parameters
+            log.info(f"[BLE] Link timing now: interval {p.connection_interval:.2f}ms, "
+                     f"latency {p.peripheral_latency}, "
+                     f"timeout {p.supervision_timeout:.0f}ms")
+        try:
+            connection.on(connection.EVENT_CONNECTION_PARAMETERS_UPDATE, on_update)
+        except Exception as e:
+            log.debug(f"Cannot watch connection parameters: {e}")
 
     async def _run_ble_handler(self):
         """Handle BLE connections."""
@@ -178,10 +245,10 @@ class BLEMixin:
                     peer_address_type=peer.address_type if peer is not None else 0,
                     peer_address=peer if peer is not None else Address.ANY,
                     own_address_type=OwnAddressType.PUBLIC,
-                    connection_interval_min=12,
-                    connection_interval_max=24,
-                    max_latency=0,
-                    supervision_timeout=72,
+                    connection_interval_min=CONN_INTERVAL_MIN,
+                    connection_interval_max=CONN_INTERVAL_MAX,
+                    max_latency=CONN_MAX_LATENCY,
+                    supervision_timeout=CONN_SUPERVISION_TIMEOUT,
                     min_ce_length=0,
                     max_ce_length=0,
                 ), check_result=True)

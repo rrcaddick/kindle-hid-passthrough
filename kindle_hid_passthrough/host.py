@@ -193,6 +193,9 @@ class HIDHost(ClassicMixin, BLEMixin):
         self.transport, self.device = await create_bumble_device(
             self.transport_spec, configure=configure)
 
+        if self.ble_devices:
+            self._pin_connection_parameters()
+
         if self.device.address_resolution_offload:
             await self._set_device_privacy_modes()
             log.info("Controller address resolution enabled")
@@ -359,6 +362,8 @@ class HIDHost(ClassicMixin, BLEMixin):
 
     def _new_session(self, address: str, protocol: Protocol, connection) -> DeviceSession:
         """Session factory for the protocol mixins (avoids circular imports)."""
+        if protocol == Protocol.BLE:
+            self._watch_connection_parameters(connection)
         return DeviceSession(address, protocol, connection)
 
     def _register_session(self, session: DeviceSession):
