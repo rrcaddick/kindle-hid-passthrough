@@ -49,21 +49,6 @@ CONN_SUPERVISION_TIMEOUT = 72   # 720ms
 CONN_SUPERVISION_MAX = 3200  # 32s, the spec ceiling
 
 
-def _link_is_fast_enough(connection):
-    """True when the live link already has no latency and a short interval.
-
-    Connection.parameters carries the values in milliseconds, as reported by
-    the controller after the last update, so this reflects the link as it
-    actually is rather than what anyone asked for.
-    """
-    params = getattr(connection, 'parameters', None)
-    if params is None:
-        return False
-    try:
-        return (params.peripheral_latency == CONN_MAX_LATENCY
-                and params.connection_interval <= CONN_INTERVAL_MAX * 1.25 + 0.01)
-    except AttributeError:
-        return False
 
 
 class BLEMixin:
@@ -102,17 +87,25 @@ class BLEMixin:
             # A remote that wanted latency will not stop asking just because
             # it was told yes — it can see the link did not change, and a
             # CLOUT ring re-asks about twice a second, indefinitely. Answer
-            # every time, but only touch the link when it actually needs it:
-            # each grant is a real LL connection update, and renegotiating
-            # twice a second costs exactly the responsiveness we came for.
-            if _link_is_fast_enough(connection):
+            # every time, but only touch the link once per connection: each
+            # grant is a real LL connection update, and renegotiating twice a
+            # second costs exactly the responsiveness we came for.
+            #
+            # Whether we have already done it is remembered on the connection
+            # rather than read back off the link. Reading the link cannot
+            # distinguish "we clamped it" from "it was born this way" — the
+            # connection is created at these parameters, so a state check is
+            # true on the very first request and the clamp never applies at
+            # all. That bug shipped once; hence the explicit flag, which also
+            # dies with the connection and so cannot outlive a handle.
+            if getattr(connection, '_khp_params_pinned', False):
                 manager.send_control_frame(
                     connection, cid,
                     L2CAP_Connection_Parameter_Update_Response(
                         identifier=request.identifier,
                         result=L2CAP_CONNECTION_PARAMETERS_ACCEPTED_RESULT))
-                log.debug(f"[BLE] Ignoring repeat parameter request {asked}; "
-                          f"link is already fast")
+                log.debug(f"[BLE] Repeat parameter request {asked} acknowledged, "
+                          f"link left alone")
                 return
 
             request.interval_min = CONN_INTERVAL_MIN
@@ -125,6 +118,7 @@ class BLEMixin:
                 f"latency {asked[2]}, timeout {asked[3]}; granting "
                 f"{request.interval_min}-{request.interval_max}, "
                 f"latency {request.latency}, timeout {request.timeout}")
+            connection._khp_params_pinned = True
             return handler(connection, cid, request)
 
         manager.on_l2cap_connection_parameter_update_request = clamped
