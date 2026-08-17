@@ -10,6 +10,13 @@ only matters to external tools such as kindle-button-mapper that inject key
 events, so a missing `uinput.ko` is a warning while a missing `uhid.ko` leaves
 HID unusable.
 
+A node in `/dev` is **not** proof the driver is there. `/dev` is a plain tmpfs
+on these devices, so a char node outlives the driver behind it and can even be
+created before one exists — a Paperwhite 4 ships a `/dev/uinput` whose `open()`
+returns `ENODEV`. `ensure_uinput()` therefore opens the node rather than
+`stat`-ing it, and rebuilds it from `/sys/class/misc/*/dev` after loading a
+module, since `insmod` may leave no node at all or a stale one.
+
 Modules are matched by exact filename:
 `{uhid,uinput}-{uname-r}-{trailing-build-from-/etc/version.txt}-{codename}.ko`.
 A single model can need more than one module across firmware updates (different
@@ -24,8 +31,8 @@ Legend: ✅ have it · ⚠️ built, not yet device-tested · ❌ missing · n/a
 | Oasis (2016) | duet | BCM4343 | 3.0.35-lab126 | ❌ needs uhid backport (kernel predates mainline uhid) | ❌ |
 | Basic 2 (2016) | heisenberg | BCM4343 | 3.10.53-lab126 | ⚠️ build 409749 | ❌ |
 | Oasis 2 (2017) | zelda | BCM4343 | 4.1.15-lab126 | ✅ builds 409745, 443455 | ✅ build 443455 |
-| Paperwhite 4 (2018) | rex | BCM4343 | 4.1.15-lab126 | ✅ builds 435186, 476967 · ⚠️ build 360278 | ⚠️ build 476967 |
-| Basic 3 (2019) | rex | BCM4343 | 4.1.15-lab126 | ✅ builds 435186, 476967 · ⚠️ build 360278 | ⚠️ build 476967 |
+| Paperwhite 4 (2018) | rex | BCM4343 | 4.1.15-lab126 | ✅ builds 435186, 476967 · ⚠️ build 360278 | ✅ build 476967 (also loads on 476968) |
+| Basic 3 (2019) | rex | BCM4343 | 4.1.15-lab126 | ✅ builds 435186, 476967 · ⚠️ build 360278 | ✅ build 476967 (also loads on 476968) |
 | Oasis 3 (2019) | zelda | BCM4343 | 4.1.15-lab126 | ✅ builds 409745, 443455 | ✅ build 443455 |
 | Paperwhite 5 (2021) | — | MediaTek | — | n/a (native `/dev/uhid`) | n/a |
 | Basic 4 (2022) | — | MediaTek | — | n/a | n/a |

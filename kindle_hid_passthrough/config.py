@@ -149,6 +149,42 @@ class Config:
         protocol_str = self._get('protocol', 'type', 'ble').lower()
         self.protocol = self._parse_protocol(protocol_str)
 
+        # Digitizer -> key quirk (see digitizer_keys.py)
+        self.digitizer_keys = self._get('quirks', 'digitizer_keys', 'auto').lower()
+        self.gesture_keys = self._load_gesture_keys()
+
+    def _load_gesture_keys(self) -> dict:
+        """Per-gesture key names from [quirks], falling back to the defaults.
+
+        An empty value means "leave this gesture unmapped", which is how a
+        remote with fewer controls avoids declaring keys it can never send.
+        """
+        from digitizer_keys import DEFAULT_GESTURE_KEYS, GESTURES, KEY_USAGES
+        keys = {}
+        for gesture in GESTURES:
+            value = self._get('quirks', gesture, None)
+            if value is None:
+                continue
+            value = value.strip().lower()
+            if value and value not in KEY_USAGES:
+                logging.getLogger(__name__).warning(
+                    "Unknown key '%s' for %s; using default '%s'",
+                    value, gesture, DEFAULT_GESTURE_KEYS[gesture])
+                continue
+            keys[gesture] = value
+        return keys
+
+    def digitizer_keys_for(self, address: str) -> str:
+        """Quirk mode for one device: 'auto', 'on' or 'off'.
+
+        A [device:AA:BB:...] section overrides the global setting, so one odd
+        remote can be handled without changing how every other device behaves.
+        """
+        mode = self._get(f'device:{normalize_addr(address)}', 'digitizer_keys',
+                         self.digitizer_keys)
+        mode = (mode or 'auto').strip().lower()
+        return mode if mode in ('auto', 'on', 'off') else 'auto'
+
     def _detect_transport(self) -> str:
         """Auto-detect HCI transport from Kindle hardware.
 

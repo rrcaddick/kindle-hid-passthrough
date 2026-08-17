@@ -150,6 +150,34 @@ Paired devices are stored in `devices.conf`:
 
 **Multi-device support**: Every configured device connects and stays connected at the same time, across both protocols. Sessions are tracked per address, so a keyboard over Classic and a mouse over BLE (or several of each) work together.
 
+### Remotes that fake a touchscreen swipe
+
+Many cheap BLE "page turner" rings and clickers have no keyboard at all. Their only input collection is a **Digitizer**, and pressing a button makes the firmware replay a canned finger swipe — a short run of absolute X/Y samples with Tip Switch held. On a phone that lands on the touchscreen and turns the page; on a Kindle it lands nowhere, because the Digitizer has to be stripped before the descriptor reaches `uhid` (see [Kernel Modules](#kernel-modules)), so the reports arrive with a report ID the kernel was never told about and are discarded. The remote pairs, connects, gets an `eventX` node, and does nothing.
+
+The daemon recognises these devices and turns each stroke into a key press, declared by a small keyboard collection appended to the descriptor. The keys come out of the **same** `eventX` node as the rest of the device, so `kindle-button-mapper` and the KOReader plug-in see a plain keyboard.
+
+Defaults: swipe right/left/down/up → Right/Left/Down/Up arrow, tap → Enter. Configure in `config.ini`:
+
+```ini
+[quirks]
+# auto - on for devices whose *first* collection is a digitizer (default)
+# on   - on for any device with a digitizer collection
+# off  - never
+digitizer_keys = auto
+
+# One of: right left up down enter pageup pagedown space home end escape
+# Blank leaves that stroke unmapped.
+swipe_right = pagedown
+swipe_left = pageup
+tap = enter
+
+# Per-device override:
+[device:00:00:00:A1:90:19]
+digitizer_keys = on
+```
+
+`auto` deliberately only fires for devices that *lead* with a digitizer, which is what a fake-touch remote looks like. A keyboard or gamepad that merely appends a digitizer collection still works on its own and is left alone.
+
 ## Mapping Inputs to Specific Actions
 
 On **Kindle**, the reading application ignores standard input devices, so you need a separate input mapper to trigger actions like page turns. Recommended: [kindle-button-mapper-rs](https://github.com/zampierilucas/kindle-button-mapper-rs) - A lightweight daemon that maps HID inputs to Kindle actions.

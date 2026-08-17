@@ -124,7 +124,7 @@ def _ensure_hid_core(kernel, build, codename):
 
 def ensure_uhid():
     """Load bundled uhid.ko on Kindles whose stock kernel lacks CONFIG_UHID."""
-    if os.path.exists('/dev/uhid'):
+    if _node_works('/dev/uhid'):
         return True
     codename = detect_codename()
     if not codename:
@@ -142,23 +142,56 @@ def ensure_uhid():
     _ensure_hid_core(kernel, build, codename)
     for ko in candidates:
         log.info(f"loading {os.path.basename(ko)}")
-        if not run(['/sbin/insmod', ko]):
+        if not run(['/sbin/insmod', ko]) and not os.path.exists('/sys/class/misc/uhid'):
             continue
         # duet lacks devtmpfs, so misc_register doesn't create /dev/uhid
-        if not os.path.exists('/dev/uhid'):
-            _create_dev_node('/sys/class/misc/uhid/dev', '/dev/uhid')
-        if os.path.exists('/dev/uhid'):
+        if _refresh_dev_node('/sys/class/misc/uhid/dev', '/dev/uhid'):
             return True
     _log_missing_kmod(codename, expected)
     return False
 
 
+def _node_works(dev_path):
+    """True only if the node opens.
+
+    A char device node is just a major:minor pair in a tmpfs /dev; it happily
+    outlives the driver behind it and can be created before one ever exists.
+    Kindles ship a /dev/uinput with no uinput driver registered, so opening
+    it fails with ENODEV while os.path.exists() says yes. Testing existence
+    is what made the daemon report a working virtual keyboard to
+    kindle-button-mapper that could never inject a key.
+    """
+    try:
+        fd = os.open(dev_path, os.O_WRONLY | os.O_NONBLOCK)
+    except OSError:
+        return False
+    os.close(fd)
+    return True
+
+
+def _refresh_dev_node(sysfs_dev, dev_path):
+    """Point dev_path at the driver that is registered now.
+
+    Loading the module may leave no node at all (tmpfs /dev, no devtmpfs) or
+    leave a stale one from a previous boot. Either way the fix is to rebuild
+    it from the minor the driver just claimed.
+    """
+    if _node_works(dev_path):
+        return True
+    try:
+        os.unlink(dev_path)
+    except OSError:
+        pass
+    return _create_dev_node(sysfs_dev, dev_path) and _node_works(dev_path)
+
+
 def ensure_uinput():
     """Best-effort /dev/uinput: stock module, then bundled .ko, else explain."""
-    if os.path.exists('/dev/uinput'):
+    if _node_works('/dev/uinput'):
         return True
     # Device may ship uinput.ko itself (in /lib/modules) even if not built-in.
-    if run(['/sbin/modprobe', 'uinput']) and os.path.exists('/dev/uinput'):
+    if run(['/sbin/modprobe', 'uinput']) and \
+            _refresh_dev_node('/sys/class/misc/uinput/dev', '/dev/uinput'):
         return True
     codename = detect_codename()
     build = _read_firmware_build() if codename else None
@@ -168,11 +201,10 @@ def ensure_uinput():
         expected = f"uinput-{kernel}-{build}-{codename}.ko"
         for ko in _find_bundled_kos(f"uinput-{kernel}-*-{codename}.ko", exact_first=expected):
             log.info(f"loading {os.path.basename(ko)}")
-            if not run(['/sbin/insmod', ko]):
+            if not run(['/sbin/insmod', ko]) and not os.path.exists('/sys/class/misc/uinput'):
                 continue
-            if not os.path.exists('/dev/uinput'):
-                _create_dev_node('/sys/class/misc/uinput/dev', '/dev/uinput')
-            if os.path.exists('/dev/uinput'):
+            if _refresh_dev_node('/sys/class/misc/uinput/dev', '/dev/uinput'):
+                log.success("uinput ready; external mappers can inject keys")
                 return True
     _log_missing_kmod(codename, expected, mod='uinput', optional=True)
     return False

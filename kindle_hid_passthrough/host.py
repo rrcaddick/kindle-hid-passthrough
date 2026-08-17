@@ -13,6 +13,8 @@ from bt_setup import ensure_uhid
 from classic import ClassicMixin
 from config import Protocol, clean_device_name, config, get_version, normalize_addr
 from device_cache import DeviceCache
+from digitizer_keys import (GestureTranslator, find_digitizer_spec,
+                            leads_with_digitizer, pick_report_id)
 from logging_utils import log
 from pairing import create_keystore, create_pairing_config
 from transport import create_bumble_device
@@ -44,6 +46,7 @@ class DeviceSession:
         self.hid_reports = []
         self.uhid_device = None
         self.is_pointer = False
+        self.digitizer_keys = None
         self.last_report = None
         self.setup_task = None
         self.closed = False
@@ -492,9 +495,20 @@ class HIDHost(ClassicMixin, BLEMixin):
         if data != session.last_report:
             log.debug(f"Report: {data.hex()}")
             session.last_report = data
-        if session.uhid_device:
+        if not session.uhid_device:
+            return
+
+        reports = [data]
+        translator = session.digitizer_keys
+        if translator and data and translator.owns(data[0]):
+            # The digitizer's report ID is not in the descriptor uhid was
+            # given, so forwarding the original would only be dropped. Send
+            # whatever gesture it completed instead, if any.
+            reports = translator.translate(data)
+
+        for report in reports:
             try:
-                session.uhid_device.send_input(data)
+                session.uhid_device.send_input(report)
             except Exception as e:
                 log.warning(f"UHID send failed: {e}")
 
@@ -522,6 +536,7 @@ class HIDHost(ClassicMixin, BLEMixin):
         try:
             name = self._configured_name(session.address) or session.name or "HID Device"
             descriptor = strip_digitizer_collections(session.report_map)
+            descriptor = self._add_digitizer_keys(session, descriptor)
             session.uhid_device = UHIDDevice(
                 name=name,
                 report_descriptor=descriptor,
@@ -540,6 +555,48 @@ class HIDHost(ClassicMixin, BLEMixin):
                     self._notify_pointer(True)
         except Exception as e:
             log.error(f"Failed to create UHID device: {e}")
+
+    def _add_digitizer_keys(self, session: DeviceSession, descriptor: bytes) -> bytes:
+        """Give a digitizer-only remote a keyboard, so its buttons do something.
+
+        Some remotes have no keyboard collection at all: pressing a button
+        replays a canned finger swipe on a Digitizer, which
+        strip_digitizer_collections() then has to drop, leaving the device
+        with an input node that never fires. For those, append a small
+        keyboard collection and arm a translator that turns each stroke into
+        one of its keys.
+
+        On 'auto' this only fires for devices that *lead* with a digitizer,
+        which is what a fake-touch remote looks like. A keyboard or gamepad
+        that merely appends a digitizer collection keeps working on its own
+        and must not sprout phantom arrow keys.
+        """
+        mode = config.digitizer_keys_for(session.address)
+        if mode == 'off':
+            return descriptor
+        spec = find_digitizer_spec(session.report_map)
+        if not spec:
+            return descriptor
+        if mode == 'auto' and not leads_with_digitizer(session.report_map):
+            log.debug("digitizer_keys: digitizer is not the primary collection, skipping")
+            return descriptor
+
+        report_id = pick_report_id(
+            descriptor, reserved=[rid for rid, _ in session.hid_reports])
+        if report_id is None:
+            log.warning("digitizer_keys: no free report ID, skipping")
+            return descriptor
+
+        translator = GestureTranslator(spec, report_id, config.gesture_keys)
+        if not translator.gestures:
+            log.warning("digitizer_keys: no gestures mapped, skipping")
+            return descriptor
+
+        session.digitizer_keys = translator
+        log.success(
+            f"Digitizer report {spec.report_id} -> keys on report {report_id} "
+            f"({', '.join(translator.gestures)})")
+        return descriptor + translator.descriptor_addition
 
     def _pointer_count(self) -> int:
         return sum(1 for s in self.sessions.values()
